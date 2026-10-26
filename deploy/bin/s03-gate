@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""OpenClaw agent 调用白名单代理的客户端（安装到 /usr/local/bin/s03-gate）。
+
+  s03-gate status            只读摘要
+  s03-gate pause <原因>       暂停新开仓（不撤止损、不平仓）
+
+token 从 /etc/s03/openclaw/gate.token 读取（属主 openclaw，权限 0400），
+agent 只能调用本命令，看不到 token 本身。没有 resume：恢复只能由人执行。
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+URL = os.environ.get("S03_GATE_URL", "http://127.0.0.1:8765")
+TOKEN_FILE = os.environ.get("S03_GATE_TOKEN_FILE", "/etc/s03/openclaw/gate.token")
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] not in ("status", "pause"):
+        print(__doc__)
+        return 2
+    if not URL.startswith(("http://127.0.0.1", "http://localhost")):
+        print("只允许本机代理地址")
+        return 2
+    token = open(TOKEN_FILE, encoding="utf-8").read().strip()
+    if sys.argv[1] == "status":
+        req = urllib.request.Request(URL + "/status", method="GET")
+    else:
+        reason = " ".join(sys.argv[2:])[:200] or "openclaw"
+        req = urllib.request.Request(URL + "/pause", method="POST",
+                                     data=json.dumps({"reason": reason}, ensure_ascii=False).encode())
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(r.read().decode())
+            return 0
+    except urllib.error.HTTPError as e:
+        print(json.dumps({"error": e.code}))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

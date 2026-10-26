@@ -1,0 +1,73 @@
+// OpenClaw 配置片段：4 个 S-03 agent 与 hooks。合并进你的 OpenClaw 配置后，用 `openclaw doctor` 检查。
+// 键名来自官方文档（2026-10-26 查阅：webhooks、multi-agent-sandbox-tools、subagents）。
+// 你的版本若键名不同，以官方文档为准；标了“核对”的地方我没能在文档里找到确切写法。
+{
+  hooks: {
+    enabled: true,
+    token: "<与 /etc/s03/openclaw-hooks.env 中 OPENCLAW_HOOKS_TOKEN 相同的专用随机串>",
+    path: "/hooks",
+    // 只有这三个 agent 能被 webhook 唤醒；s03-research 只由你手动发起
+    allowedAgentIds: ["s03-analyst", "s03-ops", "s03-review"],
+    allowRequestSessionKey: false,
+  },
+
+  agents: {
+    ownership: "explicit",
+    defaults: {
+      sandbox: { mode: "off" },
+      subagents: {
+        model: "<便宜的模型 id>",          // 子 agent 用便宜模型；主 agent 用你的默认模型
+        runTimeoutSeconds: 1800,
+        maxConcurrent: 4,
+        // 嵌套层级：只允许 1 层（主 agent → 子 agent），设置方法见官方 subagents/nesting 文档（核对）
+      },
+    },
+    entries: {
+      // 1) 运维：启动、停止、重启 s03 服务，巡检，日报，导出。不派生子 agent。
+      "s03-ops": {
+        name: "S03 运维",
+        workspace: "~/.openclaw/workspace-s03-ops",   // 放 roles/s03-ops.md（作为该工作区的 AGENTS.md）
+        sandbox: { mode: "off" },                      // 需要在主机上调用 sudo systemctl；能力由 sudoers 白名单限定
+        tools: {
+          allow: ["exec", "read", "message"],
+          deny: ["write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+        },
+      },
+
+      // 2) 告警分析：由监控进程的告警唤醒；只能查状态和暂停新开仓。不派生子 agent。
+      "s03-analyst": {
+        name: "S03 告警分析",
+        workspace: "~/.openclaw/workspace-s03-analyst",
+        sandbox: { mode: "off" },                      // 需要调用主机上的 /usr/local/bin/s03-gate
+        tools: {
+          allow: ["exec", "message"],
+          deny: ["read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+        },
+      },
+
+      // 3) 研究：回测、偏差检查、机器学习验证；可派生子 agent 并行。只在沙箱里的研究副本中工作，无任何密钥。
+      "s03-research": {
+        name: "S03 研究",
+        workspace: "/srv/s03-research",
+        sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },  // 沙箱镜像需装好 Python 依赖（核对）
+        tools: {
+          allow: ["read", "write", "edit", "exec", "sessions_spawn"],
+          deny: ["process", "browser", "gateway", "message"],
+        },
+        subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-research"] },   // allowAgents 的取值格式（核对）
+      },
+
+      // 4) 复盘：读 inbox 里的日志副本，写周报草稿；可派生子 agent（每个币一个 + 风控、成本角色）。不执行命令。
+      "s03-review": {
+        name: "S03 复盘",
+        workspace: "/srv/s03-review",
+        sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },
+        tools: {
+          allow: ["read", "write", "sessions_spawn", "message"],
+          deny: ["exec", "process", "edit", "apply_patch", "browser", "gateway"],
+        },
+        subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-review"] },
+      },
+    },
+  },
+}

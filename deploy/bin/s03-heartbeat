@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""外部心跳（安装到 /usr/local/lib/s03/s03-heartbeat，由 s03-heartbeat.timer 每 5 分钟运行）。
+
+  s03-heartbeat <服务1> [<服务2> ...] [--ping-url http://127.0.0.1:8080/api/v1/ping]
+
+全部服务 active（且 ping-url 返回 200）→ 请求 S03_HEARTBEAT_URL；否则请求 S03_HEARTBEAT_URL/fail。
+S03_HEARTBEAT_URL 指向部署在另一台机器上的心跳监控（例如自建的 Healthchecks，接口与其 /ping/<uuid> 兼容）。
+心跳中断或收到 /fail 时，由那台机器的监控通过 webhook 唤醒 OpenClaw 的 s03-ops，或直接通知你。
+这样即使本机整机宕机、OpenClaw 也一起挂掉，你仍会收到通知。
+"""
+import os
+import subprocess
+import sys
+import urllib.request
+
+
+def main() -> int:
+    args, ping = [], None
+    it = iter(sys.argv[1:])
+    for a in it:
+        if a == "--ping-url":
+            ping = next(it, None)
+        else:
+            args.append(a)
+    url = os.environ.get("S03_HEARTBEAT_URL", "").rstrip("/")
+    if not url or not args:
+        print(__doc__)
+        return 2
+    bad = [u for u in args if subprocess.run(["/usr/bin/systemctl", "is-active", "--quiet", u]).returncode != 0]
+    if ping:
+        try:
+            with urllib.request.urlopen(ping, timeout=10) as r:
+                if r.status != 200:
+                    bad.append(ping)
+        except Exception:
+            bad.append(ping)
+    target = url + ("/fail" if bad else "")
+    data = ("not active: " + ", ".join(bad)).encode() if bad else None
+    try:
+        urllib.request.urlopen(urllib.request.Request(target, data=data, method="POST" if data else "GET"), timeout=10)
+    except Exception as e:                       # 心跳发不出去：对方监控会因超时而报警
+        print(type(e).__name__)
+        return 1
+    print("fail" if bad else "ok", bad)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

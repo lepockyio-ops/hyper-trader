@@ -1,0 +1,9 @@
+[Unit]
+Description=每日 00:10 UTC 唤醒 s03-ops（时间为示例值）
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

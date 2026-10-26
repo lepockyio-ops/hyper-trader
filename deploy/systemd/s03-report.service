@@ -1,0 +1,27 @@
+[Unit]
+Description=S-03 生成日报与复盘指标（只读日志；指标由程序计算）
+OnFailure=s03-notify-ops@%n.service
+
+[Service]
+Type=oneshot
+User=s03trader
+Group=s03trader
+WorkingDirectory=/var/lib/s03
+StateDirectory=s03
+Environment=S03_SETTINGS=/etc/s03/settings.toml
+
+ExecStart=/opt/s03/venv/bin/python /opt/s03/hl-s03/scripts/run.py report --days 1
+ExecStart=/opt/s03/venv/bin/python /opt/s03/hl-s03/scripts/run.py metrics --days 7
+TimeoutStartSec=1800
+ReadWritePaths=/var/lib/s03 
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027

@@ -1,0 +1,19 @@
+[Unit]
+Description=S-03 外部心跳：检查服务状态并报到
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+EnvironmentFile=/etc/s03/heartbeat.env
+ExecStart=/usr/local/lib/s03/s03-heartbeat s03-trader.service s03-alerts.service s03-gate.service
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027

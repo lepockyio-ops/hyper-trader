@@ -1,0 +1,9 @@
+[Unit]
+Description=每天 06:20 UTC 更新事件日历（保底；s03-ops 每日流程也会运行一次）
+
+[Timer]
+OnCalendar=*-*-* 06:20:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

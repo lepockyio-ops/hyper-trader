@@ -1,0 +1,12 @@
+[Unit]
+Description=服务 %i 失败时唤醒 OpenClaw 的 s03-ops agent
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+EnvironmentFile=/etc/s03/openclaw-hooks.env
+ExecStart=/usr/local/lib/s03/s03-hook s03-ops "服务 %i 进入 failed 状态。请按 AGENTS.md 的故障流程：先查 systemctl status 与最近日志，最多重启一次；仍失败就停止并通知 Pocky。不要改配置。"
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

@@ -1,0 +1,12 @@
+[Unit]
+Description=每周唤醒 s03-review：周报复盘（主 agent 派生子 agent）
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+EnvironmentFile=/etc/s03/openclaw-hooks.env
+ExecStart=/usr/local/lib/s03/s03-hook s03-review "每周复盘：读取 inbox 里的日志与报告，按 AGENTS.md 派生子 agent 分析，写出周报草稿并发给 Pocky。"
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

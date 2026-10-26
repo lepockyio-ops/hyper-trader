@@ -1,0 +1,9 @@
+hyperliquid-python-sdk==0.24.0
+eth-account>=0.13
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+pytest>=8
+hypothesis>=6.100
+# 可选：vectorbt（许可证含 Commons Clause，自用可，不能转售）
+# vectorbt>=0.26

@@ -1,0 +1,12 @@
+[Unit]
+Description=每日唤醒 s03-ops：巡检、日报、导出
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+EnvironmentFile=/etc/s03/openclaw-hooks.env
+ExecStart=/usr/local/lib/s03/s03-hook s03-ops "每日例行：按 AGENTS.md 的每日流程巡检服务、生成日报并导出，然后把摘要发给 Pocky。"
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

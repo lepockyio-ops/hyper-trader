@@ -1,0 +1,9 @@
+[Unit]
+Description=每周一 00:40 UTC 唤醒 s03-review（时间为示例值）
+
+[Timer]
+OnCalendar=Mon *-*-* 00:40:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

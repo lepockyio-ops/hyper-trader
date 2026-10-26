@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""由 systemd 调用：唤醒指定的 OpenClaw agent（官方 webhook POST /hooks/agent）。安装到 /usr/local/lib/s03/s03-hook。
+
+  s03-hook <agentId> <消息>
+
+用途：服务连续失败时唤醒 s03-ops（OnFailure=），定时唤醒 s03-ops 做日报、唤醒 s03-review 做周报。
+token 从环境变量 OPENCLAW_HOOKS_TOKEN 读取（systemd EnvironmentFile，root 0600），只在本机发送。
+"""
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.request
+
+URL = os.environ.get("OPENCLAW_HOOKS_URL", "http://127.0.0.1:18789/hooks/agent")
+ALLOWED = {"s03-ops", "s03-review", "s03-research", "s03-analyst"}
+
+
+def main() -> int:
+    if len(sys.argv) < 3 or sys.argv[1] not in ALLOWED:
+        print(__doc__)
+        return 2
+    if not URL.startswith(("http://127.0.0.1", "http://localhost", "https://")):
+        print("OpenClaw 地址只允许本机或 https")
+        return 2
+    token = os.environ.get("OPENCLAW_HOOKS_TOKEN")
+    if not token:
+        print("缺少 OPENCLAW_HOOKS_TOKEN")
+        return 2
+    agent, msg = sys.argv[1], " ".join(sys.argv[2:])[:2000]
+    body = {"message": msg, "name": f"s03 · {agent}", "agentId": agent, "sessionMode": "isolated",
+            "deliver": True, "timeoutSeconds": 600}
+    key = hashlib.sha256(f"{agent}|{msg}|{int(time.time() // 300)}".encode()).hexdigest()[:24]
+    req = urllib.request.Request(URL, data=json.dumps(body, ensure_ascii=False).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                          "Idempotency-Key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(r.status)
+            return 0
+    except Exception as e:                      # 唤醒失败不影响交易服务
+        print(type(e).__name__)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

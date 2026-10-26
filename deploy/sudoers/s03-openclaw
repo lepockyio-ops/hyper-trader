@@ -1,0 +1,30 @@
+# /etc/sudoers.d/s03-openclaw —— OpenClaw（系统用户 openclaw）可以执行的全部提权命令。
+# 安装：sudo install -m 0440 -o root -g root s03-openclaw /etc/sudoers.d/ && sudo visudo -cf /etc/sudoers.d/s03-openclaw
+#
+# 原则：
+#   - 只列完整的、参数固定的命令；不用通配符（sudoers 的 * 会匹配空格和任意参数）。
+#   - 允许启动、停止、重启 s03 服务与运行几个只读任务；不允许 enable/disable、edit、daemon-reload、
+#     reset-failed（连续崩溃后由人处理）、修改任何文件、读取 /etc/s03 下的密钥。
+#   - systemctl status / is-active 不需要 sudo，不列在这里。
+
+Cmnd_Alias S03_SERVICES = \
+    /usr/bin/systemctl start s03-trader.service,   /usr/bin/systemctl stop s03-trader.service,   /usr/bin/systemctl restart s03-trader.service, \
+    /usr/bin/systemctl start s03-alerts.service,   /usr/bin/systemctl stop s03-alerts.service,   /usr/bin/systemctl restart s03-alerts.service, \
+    /usr/bin/systemctl start s03-gate.service,     /usr/bin/systemctl stop s03-gate.service,     /usr/bin/systemctl restart s03-gate.service, \
+    /usr/bin/systemctl start s03-watchdog.service, /usr/bin/systemctl stop s03-watchdog.service, /usr/bin/systemctl restart s03-watchdog.service
+
+Cmnd_Alias S03_JOBS = \
+    /usr/bin/systemctl start s03-record.service, \
+    /usr/bin/systemctl start s03-report.service, \
+    /usr/bin/systemctl start s03-export.service, \
+    /usr/bin/systemctl start s03-events.service
+
+# 读取各服务最近 200 行日志（参数固定）；日志里不写密钥（见 s03/journal.py）
+Cmnd_Alias S03_LOGS = \
+    /usr/bin/journalctl -u s03-trader.service -n 200 --no-pager, \
+    /usr/bin/journalctl -u s03-alerts.service -n 200 --no-pager, \
+    /usr/bin/journalctl -u s03-gate.service -n 200 --no-pager, \
+    /usr/bin/journalctl -u s03-watchdog.service -n 200 --no-pager
+
+Defaults:openclaw !env_keep, env_reset, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+openclaw ALL=(root) NOPASSWD: S03_SERVICES, S03_JOBS, S03_LOGS

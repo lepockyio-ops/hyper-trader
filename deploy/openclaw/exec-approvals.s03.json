@@ -1,0 +1,82 @@
+{
+  "_说明": "OpenClaw 命令执行白名单（按 agent）。官方文档：审批策略存于执行主机的共享状态数据库，可用 openclaw 的 approvals 命令或 doctor 导入；pattern 为可执行文件路径或命令名的 glob，argPattern 为对参数（不含 argv[0]）的 ECMAScript 正则，参数以单个空格连接。审批不是权限边界，真正的限制来自 sudoers、文件权限和沙箱。本文件仅以 _ 开头的键是注释，导入前删除。",
+  "version": 1,
+  "defaults": {
+    "security": "deny",
+    "ask": "off",
+    "askFallback": "deny"
+  },
+  "agents": {
+    "s03-ops": {
+      "security": "allowlist",
+      "ask": "off",
+      "askFallback": "deny",
+      "allowlist": [
+        {
+          "pattern": "/usr/bin/sudo",
+          "argPattern": "^/usr/bin/systemctl (start|stop|restart) s03-(trader|alerts|gate|watchdog)\\.service$"
+        },
+        {
+          "pattern": "/usr/bin/sudo",
+          "argPattern": "^/usr/bin/systemctl start s03-(record|report|export|events)\\.service$"
+        },
+        {
+          "pattern": "/usr/bin/sudo",
+          "argPattern": "^/usr/bin/journalctl -u s03-(trader|alerts|gate|watchdog)\\.service -n 200 --no-pager$"
+        },
+        {
+          "pattern": "/usr/bin/systemctl",
+          "argPattern": "^(status|is-active|is-failed) s03-(trader|alerts|gate|watchdog|record|report|export|events|heartbeat)\\.service( --no-pager)?$"
+        },
+        {
+          "pattern": "/usr/local/bin/s03-gate",
+          "argPattern": "^status$"
+        },
+        {
+          "pattern": "/usr/bin/tail",
+          "argPattern": "^-n [0-9]{1,4} /srv/s03-review/inbox/(?!.*\\.\\.)[A-Za-z0-9_./-]+$"
+        }
+      ]
+    },
+    "s03-analyst": {
+      "security": "allowlist",
+      "ask": "off",
+      "askFallback": "deny",
+      "allowlist": [
+        {
+          "pattern": "/usr/local/bin/s03-gate",
+          "argPattern": "^(status|pause [^;&|`$<>\\\\\"'\\n]{1,200})$"
+        }
+      ]
+    },
+    "s03-research": {
+      "security": "allowlist",
+      "ask": "off",
+      "askFallback": "deny",
+      "allowlist": [
+        {
+          "pattern": "python3",
+          "argPattern": "^scripts/(backtest|screen_now|ml_optimize)\\.py( [A-Za-z0-9_.=:/,-]+)*$"
+        },
+        {
+          "pattern": "python3",
+          "argPattern": "^scripts/research_matrix\\.py (fetch|plan|run|verify|aggregate)( [A-Za-z0-9_.=:/,-]+)*$"
+        },
+        {
+          "pattern": "python3",
+          "argPattern": "^-m s03\\.events_calendar --out [A-Za-z0-9_./-]+\\.json( --history)?$"
+        },
+        {
+          "pattern": "python3",
+          "argPattern": "^-m pytest -q( tests)?$"
+        }
+      ]
+    },
+    "s03-review": {
+      "security": "deny",
+      "ask": "off",
+      "askFallback": "deny",
+      "allowlist": []
+    }
+  }
+}
