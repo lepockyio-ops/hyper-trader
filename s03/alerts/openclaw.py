@@ -43,7 +43,7 @@ class OpenClawConfig:
     timeout_seconds: int = 120                  # 允许 agent 运行的最长时间
     http_timeout_s: float = 10.0
     max_retries: int = 3
-    strategy_label: str = "S-03"
+    strategy_label: str = "S03 交易框架"
     venue: str = "Hyperliquid"
 
 

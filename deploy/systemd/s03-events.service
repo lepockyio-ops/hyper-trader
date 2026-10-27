@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 事件日历：从美联储、BLS、BEA 官方日程生成 events.json（失败时保留上一版并唤醒 s03-ops）
+Description=S03 事件日历：从美联储、BLS、BEA 官方日程生成 events.json（失败时保留上一版并唤醒 s03-ops）
 After=network-online.target
 Wants=network-online.target
 OnFailure=s03-notify-ops@%n.service

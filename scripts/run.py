@@ -90,7 +90,7 @@ def main() -> None:
         os.makedirs("var/reports", exist_ok=True)
         stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d")
         open(f"var/reports/metrics_{stamp}.json", "w", encoding="utf-8").write(json.dumps(m, ensure_ascii=False, indent=1))
-        md = to_markdown(m, f"S-03 复盘指标（近 {days} 天）")
+        md = to_markdown(m, f"S03 复盘指标（近 {days} 天）")
         open(f"var/reports/metrics_{stamp}.md", "w", encoding="utf-8").write(md)
         print(md)
     elif cmd == "events":

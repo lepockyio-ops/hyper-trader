@@ -2,7 +2,7 @@
 
 一次循环的顺序：
   1 心跳与熔断检查  2 拉数据并核对  3 账户快照与对账  4 管理持仓（止损确认、分批、日线规则）
-  5 对每个标的推进 S-03 状态机（与回测同一函数）  6 风控校验后下单 / 改单 / 撤单  7 写日志与状态
+  5 对每个标的调用策略插件 step()（与回测同一函数）  6 风控校验后下单 / 改单 / 撤单  7 写日志与状态
 
 mode="shadow"：用主网实时行情跑完整逻辑，成交用 research.sim 模拟，不发送任何订单。
 mode="live"：通过 Executor 发送到 settings.base_url（默认测试网）。
@@ -26,8 +26,7 @@ from s03.live.state import LiveState, PosState
 from s03.research import sim
 from s03.risk.guard import AccountSnapshot, MarketSnapshot, RiskGuard
 from s03.risk.sizing import isolated_leverage, size_position
-from s03.signals import indicators as ind
-from s03.signals.s03 import ArmState, Position, daily_context, on_daily_close, step_intraday, take_profit_plan
+from s03.strategy.api import ArmState, ExitIntent, Position, check_stop, load_strategy
 
 
 class LiveLoop:
@@ -53,6 +52,10 @@ class LiveLoop:
         from s03.ml.gate import MLGate
 
         self.mlgate = MLGate(settings.ml)      # 默认关闭；开启需你批准的模型哈希
+        self.strategy = load_strategy(settings.strategy)
+        if self.strategy.is_template:
+            self.journal.write("alert", msg="strategy_not_configured",
+                               detail="正在使用空白策略模板：不会产生任何入场。见 docs/STRATEGY_TEMPLATE.md")
 
     # ================================================================ 调度
     def run_forever(self) -> None:
@@ -154,26 +157,13 @@ class LiveLoop:
 
     # ================================================================ 数据
     def daily_contexts(self, ctxs) -> dict:
-        out = {}
-        btc_ok = None
+        """日线层交给策略插件；框架只负责取数据（只含已收盘日线）。"""
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        dailies = {}
         for coin in self.s.strategy.coins:
-            daily = self._daily_df(coin)
-            ntl = float((daily["volume"] * daily["close"]).iloc[-7:].mean())
-            out[coin] = (daily, ntl)
-        bd = out["BTC"][0] if "BTC" in out else None
-        if bd is not None:
-            e21 = ind.ema(bd["close"], self.s.strategy.ema_mid)
-            btc_ok = bool(bd["close"].iloc[-1] > e21.iloc[-1] and e21.iloc[-1] >= e21.iloc[-6])
-        res = {}
-        r1_count = 0
-        for coin, (daily, ntl) in out.items():
-            res[coin] = daily_context(coin, daily, self.s.strategy, ntl, None)
-            r1_count += res[coin].checks["R1_momentum"]
-        market_ok = bool(btc_ok) or r1_count >= 2              # R3：BTC 强或 ≥2 个标的同时强
-        for coin, (daily, ntl) in out.items():
-            res[coin] = daily_context(coin, daily, self.s.strategy, ntl, market_ok)
-        self._btc_strong = bool(btc_ok)
-        return res
+            d = self._daily_df(coin)
+            dailies[coin] = d[d.index < today]
+        return self.strategy.contexts(dailies)
 
     def _daily_df(self, coin: str) -> pd.DataFrame:
         today = pd.Timestamp.now(tz="UTC").normalize()
@@ -279,11 +269,11 @@ class LiveLoop:
             self.journal.write("alert", msg="stop_not_confirmed_closing", coin=coin)
             self.exec.close_all_market(coin)
             return
-        strong = self._strong_market(coin, ctxs)
-        tp = take_profit_plan(Position(coin, entry_px, stop, size, pd.Timestamp.now(tz="UTC")), self.s.strategy, strong)
-        for leg, (px, qty) in zip(["tp1", "tp2"] if len(tp.prices) == 2 else ["tp2"], tp.prices):
-            self.exec.place_take_profit(coin, pos_key, leg, px, qty, szd)
-        self.journal.write("position_opened", coin=coin, entry=entry_px, stop=stop, size=size, strong_market=strong)
+        legs = self.strategy.take_profit_legs(Position(coin, entry_px, stop, size, pd.Timestamp.now(tz="UTC")))
+        ps.tp_legs = [[float(px), float(frac), False] for px, frac in legs if px > entry_px and 0 < frac <= 1]
+        for i, (px, frac, _) in enumerate(ps.tp_legs):
+            self.exec.place_take_profit(coin, pos_key, f"tp{i + 1}", px, size * frac, szd)
+        self.journal.write("position_opened", coin=coin, entry=entry_px, stop=stop, size=size, tp_legs=ps.tp_legs)
 
     def _stop_visible(self, coin: str, pos_key: str, timeout: int) -> bool:
         if self.s.runtime.mode != "live":
@@ -298,14 +288,6 @@ class LiveLoop:
                     return True
             time.sleep(1)
         return False
-
-    def _strong_market(self, coin: str, ctxs) -> bool:
-        """强市保留整仓：其他持仓浮盈合计 ≥ 2R 且 BTC 在上行 21 日 EMA 之上（第 5 节）。"""
-        cushion_r = 0.0
-        for p in self.state.positions.values():
-            if p.coin != coin and p.entry_px > p.stop_px:
-                cushion_r += (ctxs[p.coin]["markPx"] - p.entry_px) / (p.entry_px - p.stop_px)
-        return getattr(self, "_btc_strong", False) and cushion_r >= self.s.strategy.strong_market_cushion_r
 
     def on_position_closed(self, coin: str, pnl: float | None = None) -> None:
         ps = self.state.positions.pop(coin)
@@ -332,12 +314,7 @@ class LiveLoop:
             szd = ctxs[coin]["szDecimals"]
             if self.s.runtime.mode == "shadow":                     # 影子模式：用最新 15m K 线模拟止损/止盈
                 bar = self.hl.recent(coin, "15m", 2).iloc[-1]
-                tps = []
-                r = ps.entry_px - ps.stop_px
-                if not ps.tp1_done:
-                    tps.append(("tp1", ps.entry_px + self.s.strategy.tp1_r * r, self.s.strategy.tp1_frac))
-                if not ps.tp2_done:
-                    tps.append(("tp2", ps.entry_px + self.s.strategy.tp2_r * r, self.s.strategy.tp2_frac))
+                tps = [(f"tp{i + 1}", leg[0], leg[1]) for i, leg in enumerate(ps.tp_legs) if not leg[2]]
                 for ev in sim.bar_exits(bar, ps.stop_px, tps, c.slippage):
                     qty = ps.remaining if ev.frac_of_initial < 0 else min(ps.remaining, ps.size * ev.frac_of_initial)
                     fee = c.taker_fee if ev.kind == "stop" else c.maker_fee
@@ -345,18 +322,18 @@ class LiveLoop:
                     self.state.shadow_equity += pnl
                     ps.realized += pnl
                     ps.remaining -= qty
-                    if ev.kind == "tp1":
-                        ps.tp1_done = True
-                    elif ev.kind == "tp2":
-                        ps.tp2_done = True
+                    if ev.kind.startswith("tp"):
+                        ps.tp_legs[int(ev.kind[2:]) - 1][2] = True
                     self.journal.write("shadow_exit", coin=coin, kind=ev.kind, px=ev.price, qty=qty, pnl=pnl)
                 if ps.remaining <= 1e-12:
                     self.on_position_closed(coin, pnl=ps.realized)
                     continue
             if new_day:
-                pos = Position(coin, ps.entry_px, ps.stop_px, ps.remaining, pd.Timestamp(ps.opened_at),
-                               ps.tp1_done, ps.tp2_done, ps.extension_done)
-                it = on_daily_close(pos, dctx[coin], now, self.s.strategy)
+                pos = Position(coin, ps.entry_px, ps.stop_px, ps.remaining, pd.Timestamp(ps.opened_at), dict(ps.flags))
+                if now - pos.opened_at >= pd.Timedelta(days=self.s.strategy.max_hold_days):   # 框架强制
+                    it = ExitIntent("close", coin, ps.remaining, reason="max_hold")
+                else:
+                    it = self.strategy.on_daily_close(pos, dctx[coin], now)
                 if it is None:
                     continue
                 self.journal.write("exit_intent", intent=it)
@@ -371,8 +348,7 @@ class LiveLoop:
                     if ps.remaining <= 1e-12:
                         self.on_position_closed(coin, pnl=ps.realized)
                         continue
-                if it.kind == "reduce":
-                    ps.extension_done = True
+                ps.flags.update(it.set_flags or {})
 
     # ================================================================ 入场状态机
     def step_coin(self, coin: str, c: dict, ctx, acct: AccountSnapshot, blocked: bool, block_reasons) -> None:
@@ -405,7 +381,7 @@ class LiveLoop:
 
         mkt = self.market_snapshot(coin, c, None)
         mb = self.guard.market_block(mkt)
-        new_st, intent = step_intraday(st, ctx, bars15, s.strategy, blocked=blocked or not mb.ok)
+        new_st, intent = self.strategy.step(st, ctx, bars15, blocked=blocked or not mb.ok)
         if intent is None:
             self.state.set_arm(new_st)
             return
@@ -419,6 +395,19 @@ class LiveLoop:
             return
 
         entry = next_px_above(intent.trigger_px, szd)
+        stop = check_stop(entry, intent.stop_px, s.strategy)       # 框架止损护栏：插件不能绕过
+        if stop is None:
+            self.journal.write("plan_rejected", card={"coin": coin, "trigger": entry, "stop": intent.stop_px},
+                               reasons=["stop_out_of_range"])
+            if intent.kind == "modify" and arm.get("arm_key"):
+                self.exec.cancel_entry(coin, arm["arm_key"])
+            self.state.set_arm(ArmState(coin, "armed"), arm_key=None)
+            return
+        if stop != intent.stop_px:
+            from dataclasses import replace as _dc_replace
+
+            intent = _dc_replace(intent, stop_px=stop)
+            new_st = _dc_replace(new_st, stop_px=stop)
         acct = self._with_pending(acct, exclude=coin)        # 已挂入场单按“若全部成交”计入风险与相关性
         rf = self.guard.corr_scaled_risk(coin, acct, self._closes_frame())
         ml_note = self.mlgate.status
@@ -426,7 +415,8 @@ class LiveLoop:
             from s03.ml.features import build_features
 
             feats = build_features(ctx, bars15, intent.stop_px, entry,
-                                   self._daily_df("BTC") if "BTC" in s.strategy.coins else None, c["funding"])
+                                   self._daily_df("BTC") if "BTC" in s.strategy.coins else None, c["funding"],
+                                   extra=self.strategy.ml_features(ctx, bars15, intent.stop_px, entry))
             scale, ml_note = self.mlgate.decide(feats)
             rf *= min(1.0, scale)                     # 只能降低风险，不能放大
         plan = size_position(acct.equity, entry, intent.stop_px, c["maxLeverage"], s.risk, s.cost, risk_frac=rf)
@@ -436,7 +426,8 @@ class LiveLoop:
                 "size": plan.size, "notional": plan.notional, "risk_usd": plan.risk_usd,
                 "stop_dist_pct": plan.stop_dist_pct, "leverage": plan.leverage,
                 "liq_dist_pct": plan.liq_dist_pct, "funding": c["funding"], "ref_dev_pct": mkt.ref_deviation_pct,
-                "daily_checks": ctx.checks, "zone": ctx.zone, "risk_frac": rf, "ml": ml_note}
+                "strategy": self.strategy.name, "daily_checks": ctx.checks, "context": ctx.data,
+                "risk_frac": rf, "ml": ml_note}
         too_small = rf < 0.5 * s.risk.risk_per_trade          # 相关性额度只剩零头时不交易
         if too_small or not v.ok or not mb2.ok:
             self.journal.write("plan_rejected", card=card, reasons=v.reasons + mb2.reasons + (["corr_cap"] if too_small else []))

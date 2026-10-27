@@ -1,4 +1,4 @@
-"""15 分钟逐笔回放回测（G1–G6 的精确口径；复用实盘同一个信号模块）。
+"""15 分钟逐笔回放回测（G1–G6 的精确口径；与实盘调用同一个策略插件和同一个止损护栏）。
 
 用法见 scripts/backtest.py。输入：
   daily: 日线（已收盘），bars15: 15 分钟线（已收盘），同一标的、UTC 索引
@@ -15,7 +15,7 @@ import pandas as pd
 from s03.config import Settings
 from s03.research import sim
 from s03.risk.sizing import size_position
-from s03.signals.s03 import ArmState, daily_context, step_intraday
+from s03.strategy.api import ArmState, ExitIntent, Position, StrategyPlugin, check_stop, load_strategy
 
 
 @dataclass
@@ -30,13 +30,15 @@ class OpenTrade:
     realized: float = 0.0
     fees: float = 0.0
     funding: float = 0.0
-    extension_done: bool = False
+    flags: dict = field(default_factory=dict)
 
 
 def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: Settings,
                platform_max_leverage: int, impl: str = "A", equity0: float = 10_000.0,
-               funding: pd.Series | None = None, warmup_days: int = 200) -> tuple[pd.DataFrame, dict]:
+               funding: pd.Series | None = None, warmup_days: int = 200,
+               strategy: StrategyPlugin | None = None) -> tuple[pd.DataFrame, dict]:
     s, c, r = settings.strategy, settings.cost, settings.risk
+    strat = strategy or load_strategy(s)
     equity = equity0
     state = ArmState(coin)
     pending: dict | None = None            # 已挂（模拟）入场单
@@ -50,7 +52,7 @@ def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: S
     def ctx_for(day: pd.Timestamp):
         if day not in ctx_cache:
             hist = daily[daily.index < day]
-            ctx_cache[day] = daily_context(coin, hist, s) if len(hist) > max(s.momentum_lookbacks) + 5 else None
+            ctx_cache[day] = strat.context(coin, hist) if len(hist) >= strat.warmup_days else None
         return ctx_cache[day]
 
     prev_day = None
@@ -72,15 +74,18 @@ def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: S
                 pos.remaining -= qty
                 pos.tps = [x for x in pos.tps if x[0] != ev.kind]
             if prev_day is not None and day != prev_day and ctx is not None and pos.remaining > 1e-12:
-                held = t - pos.entry_time
-                exit_all = held >= pd.Timedelta(days=s.max_hold_days) or ctx.close < ctx.ema_fast
-                if exit_all or (not pos.extension_done and ctx.close > ctx.ema_fast + s.extension_atr_mult * ctx.atr):
-                    qty = pos.remaining if exit_all else pos.remaining / 2
+                if t - pos.entry_time >= pd.Timedelta(days=s.max_hold_days):          # 框架强制
+                    it = ExitIntent("close", coin, pos.remaining, reason="max_hold")
+                else:
+                    it = strat.on_daily_close(Position(coin, pos.entry_px, pos.stop_px, pos.remaining, pos.entry_time,
+                                                       dict(pos.flags)), ctx, t)
+                if it is not None:
+                    qty = pos.remaining if it.kind == "close" else min(pos.remaining, it.size)
                     px = float(bar["open"]) * (1 - c.slippage)
                     pos.realized += qty * (px - pos.entry_px)
                     pos.fees += qty * px * c.taker_fee
                     pos.remaining -= qty
-                    pos.extension_done = True
+                    pos.flags.update(it.set_flags or {})
             if pos.remaining <= 1e-12:
                 pnl = pos.realized - pos.fees - pos.funding
                 equity += pnl
@@ -109,8 +114,8 @@ def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: S
                 plan = size_position(equity, fill, pending["stop"], platform_max_leverage, r, c)
                 pos = OpenTrade(t, fill, pending["stop"], plan.size, plan.size, plan.risk_usd)
                 pos.fees += plan.size * fill * c.taker_fee
-                pos.tps = [("tp1", fill + s.tp1_r * (fill - pending["stop"]), s.tp1_frac),
-                           ("tp2", fill + s.tp2_r * (fill - pending["stop"]), s.tp2_frac)]
+                legs = strat.take_profit_legs(Position(coin, fill, pending["stop"], plan.size, t))
+                pos.tps = [(f"tp{k + 1}", float(px), float(fr)) for k, (px, fr) in enumerate(legs) if px > fill and 0 < fr <= 1]
                 state = ArmState(coin, phase="in_position")
                 pending = None
                 for ev in sim.bar_exits(bar, pos.stop_px, [], c.slippage):   # 同根打到止损（保守）
@@ -122,12 +127,13 @@ def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: S
         # ---- 信号状态机（与实盘同一函数）
         if pos is None and ctx is not None:
             hist15 = b15.iloc[max(0, i - 200): i + 1]
-            state, intent = step_intraday(state, ctx, hist15, s)
+            state, intent = strat.step(state, ctx, hist15)
             if intent is not None:
-                if intent.kind == "cancel":
+                stop = check_stop(intent.trigger_px, intent.stop_px, s) if intent.kind != "cancel" else None
+                if intent.kind == "cancel" or stop is None:          # 止损不合规：与实盘一样不挂单
                     pending = None
                 else:
-                    pending = {"trigger": intent.trigger_px, "limit": intent.limit_px, "stop": intent.stop_px}
+                    pending = {"trigger": intent.trigger_px, "limit": intent.limit_px, "stop": stop}
 
     tdf = pd.DataFrame(trades)
     return tdf, summarize(tdf, equity0)

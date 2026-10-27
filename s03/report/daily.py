@@ -30,7 +30,7 @@ def build_report(journal: Journal, since: pd.Timestamp, until: pd.Timestamp | No
     rejects = Counter(x for r in recs if r["kind"] == "plan_rejected" for x in r.get("reasons", []))
     cycles = [r for r in recs if r["kind"] == "cycle"]
     lines = [
-        f"# S-03 报告 {since.date()} – {until.date()}（UTC）",
+        f"# S03 报告 {since.date()} – {until.date()}（UTC）",
         "",
         f"- 循环次数：{len(cycles)}（应为 {int((until - since).total_seconds() // 900)} 次左右）",
         f"- 计划卡：{kinds.get('plan_card', 0)}；被拒：{kinds.get('plan_rejected', 0)}；"

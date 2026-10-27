@@ -15,7 +15,7 @@
 6. 事件窗口回测：`python3 -m s03.events_calendar --out research/events_history.json --history`（BLS 只有 2025 年起的日程，之前的年份事件不全，报告里注明）。
 
 ## 规格审查（每次策略代码有改动时）
-派一个规格审查子 agent（任务模板见 `tasks/spec-review.md`）：只给它手册第 5、7 节的规则表和改动的文件，让它逐条列出“规则与代码不一致”的地方。它不改代码；结果写进 `reports/` 交给 Pocky。随机性质测试（`tests/test_properties.py`）必须同时通过。
+派一个规格审查子 agent（任务模板见 `tasks/spec-review.md`）：只给它 docs/STRATEGY_TEMPLATE.md 里填好的策略规格、手册第 7 节（风险）的规则表和改动的文件，让它逐条列出“规则与代码不一致”的地方。它不改代码；结果写进 `reports/` 交给 Pocky。随机性质测试（`tests/test_properties.py`）必须同时通过。
 
 ## 规则
 - 只运行白名单里的命令：`python3 scripts/backtest.py|screen_now.py|ml_optimize.py ...`、`python3 -m pytest -q`。

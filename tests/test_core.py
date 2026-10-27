@@ -17,7 +17,6 @@ from s03.research import sim  # noqa: E402
 from s03.risk.guard import AccountSnapshot, MarketSnapshot, RiskGuard  # noqa: E402
 from s03.risk.sizing import isolated_leverage, liq_distance, maintenance_rate, size_position  # noqa: E402
 from s03.signals import indicators as ind  # noqa: E402
-from s03.signals.s03 import ArmState, DailyContext, Zone, step_intraday  # noqa: E402
 
 
 # ------------------------------------------------------------ 精度
@@ -91,48 +90,6 @@ def test_pivots():
     closes = [10, 9, 8, 7, 8, 9, 10, 9, 8, 7.5, 8, 9, 10, 11]
     lows = ind.pivot_lows(_df(closes, 0.0), 3)
     assert list(lows.values) == [7, 7.5]
-
-
-# ------------------------------------------------------------ 状态机
-def _ctx(lo=99.0, hi=100.0):
-    return DailyContext("SOL", pd.Timestamp("2026-10-25", tz="UTC"), 101.0, 100.5, 99.5, 95.0, 3.0,
-                        {"all": True}, Zone(lo, hi, ("avwap", "ema_mid")), 0)
-
-
-def _bars(rows):
-    idx = pd.date_range("2026-10-26 00:00", periods=len(rows), freq="15min", tz="UTC")
-    return pd.DataFrame(rows, columns=["open", "high", "low", "close"], index=idx).assign(volume=1.0)
-
-
-def test_state_machine_arm_confirm_modify_cancel():
-    cfg = StrategyConfig()
-    ctx = _ctx()
-    st = ArmState("SOL")
-    bars = _bars([[101, 101.5, 100.8, 101.2]])
-    st, it = step_intraday(st, ctx, bars, cfg)
-    assert st.phase == "idle" and it is None                       # 还没进支撑区
-    bars = _bars([[101, 101.5, 100.8, 101.2], [100.6, 100.7, 99.6, 99.8]])
-    st, it = step_intraday(st, ctx, bars, cfg)
-    assert st.phase == "armed" and it is None                       # 进区但收阴：只布防
-    bars = _bars([[101, 101.5, 100.8, 101.2], [100.6, 100.7, 99.6, 99.8], [99.8, 100.4, 99.5, 100.3]])
-    st, it = step_intraday(st, ctx, bars, cfg)
-    assert st.phase == "confirmed" and it.kind == "place"           # 下探后回升：挂触发单
-    assert it.trigger_px == 100.4 and it.stop_px < 99.5
-    bars = _bars([[101, 101.5, 100.8, 101.2], [100.6, 100.7, 99.6, 99.8], [99.8, 100.4, 99.5, 100.3],
-                  [100.3, 100.35, 99.9, 100.1]])
-    st, it = step_intraday(st, ctx, bars, cfg)
-    assert it.kind == "modify" and it.trigger_px == 100.35          # 触发价跟随最新 K 线高点
-    bars = pd.concat([bars, _bars([[100, 100, 97.5, 97.8]]).set_axis([bars.index[-1] + pd.Timedelta("15min")])])
-    st, it = step_intraday(st, ctx, bars, cfg)
-    assert st.phase == "idle" and it.kind == "cancel"               # 跌穿支撑：撤单等待
-
-
-def test_blocked_cancels():
-    cfg = StrategyConfig()
-    st = ArmState("SOL", "confirmed", 100.4, 100.5, 99.4)
-    bars = _bars([[99.8, 100.4, 99.5, 100.3]])
-    st, it = step_intraday(st, _ctx(), bars, cfg, blocked=True)
-    assert st.phase == "idle" and it.kind == "cancel"
 
 
 # ------------------------------------------------------------ 成交模拟

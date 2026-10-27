@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 生成日报与复盘指标（只读日志；指标由程序计算）
+Description=S03 生成日报与复盘指标（只读日志；指标由程序计算）
 OnFailure=s03-notify-ops@%n.service
 
 [Service]

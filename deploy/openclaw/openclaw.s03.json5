@@ -1,4 +1,4 @@
-// OpenClaw 配置片段：4 个 S-03 agent 与 hooks。合并进你的 OpenClaw 配置后，用 `openclaw doctor` 检查。
+// OpenClaw 配置片段：4 个 S03 agent 与 hooks。合并进你的 OpenClaw 配置后，用 `openclaw doctor` 检查。
 // 键名来自官方文档（2026-10-26 查阅：webhooks、multi-agent-sandbox-tools、subagents）。
 // 你的版本若键名不同，以官方文档为准；标了“核对”的地方我没能在文档里找到确切写法。
 {

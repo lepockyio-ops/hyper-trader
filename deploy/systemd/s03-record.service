@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 录制 Hyperliquid K 线（只读公开行情）
+Description=S03 录制 Hyperliquid K 线（只读公开行情）
 OnFailure=s03-notify-ops@%n.service
 
 [Service]

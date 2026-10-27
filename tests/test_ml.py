@@ -21,7 +21,7 @@ def _events(n=900, signal=True, seed=1):
     t = pd.date_range("2021-01-01", periods=n, freq="2D", tz="UTC")
     X = pd.DataFrame(rng.normal(size=(n, len(FEATURES))), columns=FEATURES)
     noise = rng.normal(scale=1.5, size=n)
-    r = (1.2 * X["range_ratio"] if signal else 0) * -1 + noise - 0.1     # 振幅收缩越明显越好（人为设定）
+    r = (1.2 * X["vol_14d"] if signal else 0) * -1 + noise - 0.1     # 波动越低越好（人为设定的测试信号）
     df = X.assign(signal_time=t, exit_time=t + pd.Timedelta(days=10), R=r, coin="SOL")
     return df
 

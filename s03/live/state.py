@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from s03.signals.s03 import ArmState
+from s03.strategy.api import ArmState
 
 
 @dataclass
@@ -19,9 +19,8 @@ class PosState:
     remaining: float
     opened_at: str
     pos_key: str
-    tp1_done: bool = False
-    tp2_done: bool = False
-    extension_done: bool = False
+    tp_legs: list = field(default_factory=list)   # [[价格, 占初始仓位比例, 是否已成交]]，来自策略的 take_profit_legs
+    flags: dict = field(default_factory=dict)     # 策略写入的持仓标记
     stop_confirmed: bool = False
     realized: float = 0.0          # 影子模式累计已实现盈亏（含手续费）
 
@@ -46,7 +45,7 @@ class LiveState:
             return ArmState(coin)
         sb = d.get("signal_bar")
         return ArmState(coin, d["phase"], d.get("trigger_px"), d.get("limit_px"), d.get("stop_px"),
-                        pd.Timestamp(sb) if sb else None)
+                        pd.Timestamp(sb) if sb else None, dict(d.get("extra") or {}))
 
     def set_arm(self, st: ArmState, arm_key: str | None = None, size: float | None = None) -> None:
         d = asdict(st)
@@ -72,5 +71,6 @@ class LiveState:
         if not p.exists():
             return cls()
         d = json.loads(p.read_text("utf-8"))
-        d["positions"] = {k: PosState(**v) for k, v in d.get("positions", {}).items()}
+        keep = set(PosState.__dataclass_fields__)
+        d["positions"] = {k: PosState(**{f: x for f, x in v.items() if f in keep}) for k, v in d.get("positions", {}).items()}
         return cls(**d)

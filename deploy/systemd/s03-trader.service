@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 交易主循环（Hyperliquid，每 15 分钟一轮；默认 shadow 模式）
+Description=S03 交易主循环（Hyperliquid，每 15 分钟一轮；默认 shadow 模式）
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=600

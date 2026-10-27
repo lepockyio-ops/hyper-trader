@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 把日志与报告复制到复盘 agent 的收件目录（只读副本）
+Description=S03 把日志与报告复制到复盘 agent 的收件目录（只读副本）
 OnFailure=s03-notify-ops@%n.service
 
 [Service]

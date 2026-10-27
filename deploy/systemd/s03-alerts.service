@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 行情监控与告警（不需要私钥，不消耗 LLM token）
+Description=S03 行情监控与告警（不需要私钥，不消耗 LLM token）
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=600

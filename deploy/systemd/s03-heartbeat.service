@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 外部心跳：检查服务状态并报到
+Description=S03 外部心跳：检查服务状态并报到
 
 [Service]
 Type=oneshot

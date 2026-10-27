@@ -1,5 +1,21 @@
-var/
-config/settings.toml
-.env
 __pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/
 .venv/
+var/
+research/data/
+research/results/
+research/jobs.json
+research/matrix_report.md
+user_data/data/
+user_data/backtest_results/
+user_data/logs/
+user_data/hyperopt_results/
+monitor/var/
+*.sqlite
+*.sqlite-*
+# 密钥与本地配置：永远不要提交
+config/settings.toml
+user_data/config-private.json
+*.env

@@ -24,38 +24,19 @@ MAINNET_GATE_VALUE = "I_HAVE_PASSED_G1_TO_G8"
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB")
-    # 第 4 节 第一层（示例值）
-    momentum_lookbacks: tuple[int, ...] = (30, 90, 180)
-    momentum_min_pct: float = 30.0
-    min_avg_daily_ntl_usd: float = 50_000_000
-    pivot_span: int = 3
-    contraction_ratio: float = 0.8
-    ema_fast: int = 9
-    ema_mid: int = 21
-    ema_slow: int = 50
-    ema_slope_days: int = 5
-    # 第二层 支撑区
-    avwap_anchor_lookback: int = 60
-    zone_cluster_pct: float = 1.5
-    max_retests: int = 2
-    # S-03 分钟级
-    arm_buffer_pct: float = 0.5
-    invalidate_buffer_pct: float = 0.5
-    entry_impl: str = "A"                  # A：突破触发单（正式）| B：收盘突破后 IOC 限价（备用）
+    """框架层的策略设置。具体交易规则在插件里（s03/strategy/api.py），参数放 [strategy.params]。"""
+    coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB")   # 示例标的，按你的策略修改
+    # 策略插件（"模块:类名"）。默认是空白模板：不会产生任何入场
+    plugin: str = "s03.strategies.template:BlankStrategy"
+    params: dict = field(default_factory=dict)              # 传给插件的参数
+    # 入场执行（框架）
+    entry_impl: str = "A"                  # A：突破触发单 | B：收盘确认后 IOC 限价
     entry_limit_offset_pct: float = 0.1
-    stop_buffer_pct: float = 0.1
+    # 止损距离护栏（框架强制，插件不能绕过；示例值）
     stop_min_pct: float = 0.8
     stop_max_pct: float = 3.0
-    # v1.0 修正：改用当日最低点后若仍 < stop_min_pct，"skip" = 放弃本次入场（默认）；"floor" = 止损设在入场价下方 stop_min_pct
-    stop_min_mode: str = "skip"
-    tp1_r: float = 3.0
-    tp1_frac: float = 1 / 3
-    tp2_r: float = 5.0
-    tp2_frac: float = 1 / 3
-    extension_atr_mult: float = 2.0
-    max_hold_days: int = 30
-    strong_market_cushion_r: float = 2.0
+    stop_min_mode: str = "skip"            # 太近时：skip = 放弃入场；floor = 止损设在入场价下方 stop_min_pct
+    max_hold_days: int = 30                # 框架强制的最长持有天数（示例值）
     # 事件窗口（UTC，ISO 字符串列表；可由 OpenBB 或手工维护）
     event_times_utc: tuple[str, ...] = ()
     event_before_min: int = 120

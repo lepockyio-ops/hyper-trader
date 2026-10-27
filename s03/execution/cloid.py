@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 
-STRATEGY_VERSION = "S-03/v0.5"
+STRATEGY_VERSION = "S03-framework/v2.0"
 
 
 def make_cloid_hex(coin: str, purpose: str, key: str, version: str = STRATEGY_VERSION) -> str:

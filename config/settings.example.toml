@@ -9,27 +9,34 @@ scan_delay_sec = 5
 action_expires_sec = 10
 
 [strategy]
-coins = ["BTC", "ETH", "SOL", "BNB"]
-momentum_min_pct = 30.0
-min_avg_daily_ntl_usd = 50000000
-contraction_ratio = 0.8
-zone_cluster_pct = 1.5
-max_retests = 2
-stop_min_pct = 0.8
+# 策略插件（"模块:类名"）。默认是空白模板：框架能运行，但不会产生任何入场。
+#   空白模板：s03.strategies.template:BlankStrategy
+#   示例策略（只用于验证框架）：s03.strategies.examples.sma_cross:SmaCrossExample
+#   你的策略：复制 s03/strategies/template.py，例如 s03.strategies.my_strategy:MyStrategy
+plugin = "s03.strategies.template:BlankStrategy"
+coins = ["BTC", "ETH", "SOL", "BNB"]   # 示例标的，按你的策略修改
+entry_impl = "A"                       # A：突破触发单 | B：收盘确认后限价
+stop_min_pct = 0.8                     # 框架止损护栏（示例值）
 stop_max_pct = 3.0
-tp1_r = 3.0
-tp2_r = 5.0
-max_hold_days = 30
+stop_min_mode = "skip"                 # skip：止损太近就放弃 | floor：改为入场价下方 stop_min_pct
+max_hold_days = 30                     # 框架强制的最长持有天数（示例值）
 # 宏观事件（UTC）：事件文件由 s03-events 从官方日程生成，可再手工补充
-event_times_utc = []          # 手工补充的事件（UTC ISO），与事件文件合并
-event_file = "/var/lib/s03-events/events.json"   # s03-events 每天从美联储、BLS、BEA 官方日程生成；本地调试可设为 ""
+event_times_utc = []
+event_file = "/var/lib/s03-events/events.json"   # 本地调试可设为 ""
+
+[strategy.params]
+# 你的策略参数，在插件里用 self.p("名字", 默认值) 读取。示例策略可用：
+# trend_len = 50
+# fast_len = 20
+# tp_r = 2.0
+# tp_frac = 0.5
 
 [risk]
 risk_per_trade = 0.005          # 来自你的描述
 max_open_risk = 0.015
 max_positions = 3
 max_account_leverage = 30.0     # 用户设定
-max_position_leverage = 30      # 用户设定；实际由公式约束到约 7–9 倍
+max_position_leverage = 30      # 用户设定；实际还受“强平距离 ≥ 3 倍止损距离”公式约束
 liq_to_stop_multiple = 3.0
 daily_loss_halt = 0.02          # 系统故障保护，可删除
 weekly_loss_halt = 0.04         # 系统故障保护，可删除

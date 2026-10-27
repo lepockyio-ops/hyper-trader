@@ -1,5 +1,5 @@
 """随机性质测试（Hypothesis）：自动生成大量随机输入，检查“必须永远成立”的规则（手册第 5、7 节）。
-v0.x 的“最小止损未生效”和“资金费预留压缩仓位”两个问题，用这里的第 1、3 条在修复前都会失败。"""
+框架护栏对任何策略插件都成立：止损距离、强平距离、风险预算、告警冷却。"""
 from __future__ import annotations
 
 import math
@@ -11,22 +11,23 @@ from hypothesis import strategies as st
 from s03.alerts.core import AlertConfig, AlertEngine
 from s03.config import CostConfig, RiskConfig, StrategyConfig
 from s03.risk.sizing import isolated_leverage, liq_distance, maintenance_rate, size_position
-from s03.signals.s03 import _stop_for
+from s03.strategy.api import check_stop
 
 px = st.floats(min_value=1.0, max_value=200_000.0, allow_nan=False, allow_infinity=False)
 frac = st.floats(min_value=0.0, max_value=0.06, allow_nan=False)
 
 
 @settings(max_examples=2000, deadline=None)
-@given(entry=px, bar_drop=frac, day_drop=frac, mode=st.sampled_from(["skip", "floor"]))
-def test_stop_distance_always_within_min_max(entry, bar_drop, day_drop, mode):
+@given(entry=px, drop=frac, mode=st.sampled_from(["skip", "floor"]))
+def test_stop_guard_always_within_min_max(entry, drop, mode):
+    """框架止损护栏：无论策略插件给出什么止损，通过检查的止损距离一定在 [stop_min_pct, stop_max_pct]。"""
     cfg = StrategyConfig(stop_min_mode=mode)
-    bar = pd.Series({"low": entry * (1 - bar_drop)})
-    day_low = entry * (1 - max(bar_drop, day_drop))
-    stop = _stop_for(bar, day_low, entry, cfg)
+    stop = check_stop(entry, entry * (1 - drop), cfg)
     if stop is not None:
         dist = (entry - stop) / entry * 100
         assert cfg.stop_min_pct - 1e-9 <= dist <= cfg.stop_max_pct + 1e-9
+    if mode == "floor" and 1e-6 < drop * 100 < cfg.stop_min_pct:
+        assert stop is not None
 
 
 @settings(max_examples=2000, deadline=None)

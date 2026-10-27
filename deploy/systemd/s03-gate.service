@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 OpenClaw 白名单代理（127.0.0.1:8765，只有 status 与 pause）
+Description=S03 OpenClaw 白名单代理（127.0.0.1:8765，只有 status 与 pause）
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=600
