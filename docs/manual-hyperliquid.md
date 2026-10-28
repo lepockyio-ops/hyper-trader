@@ -1,6 +1,6 @@
-# 加密货币交易流程手册（Hyperliquid 永续 · 框架版 v2.0 · 策略留空）
+# 交易框架模板手册（Hyperliquid 永续 · 策略留空 v2.2）
 
-Oct 25, 2026 · @Pocky
+Oct 28, 2026 · @Pocky
 
 ## 结论摘要
 
@@ -356,7 +356,7 @@ BTC、ETH、SOL 在 30 倍或平台上限下的强平距离只有 2.0%–2.6%，
 
 按你的决定，下单直接调用 [Hyperliquid 原生 API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api)。签名和请求封装用官方文档列出的 Python SDK（[hyperliquid-python-sdk](https://github.com/hyperliquid-dex/hyperliquid-python-sdk)，MIT 许可），不再用 NautilusTrader 或 freqtrade 下单。开源项目只放在各自擅长的环节。核心原则：研究回测和实盘调用**同一个 S-03 信号模块**，只换数据来源和下单出口，这样 G7 的一致性检查才有意义。
 
-&#91;embedded content: 交易框架 · 原生 API + 开源组件\]
+&#91;embedded content: 交易框架 · 原生 API + 策略插件\]
 
 蓝色模块是关键：左边回测、右边实盘调用的是同一份 S-03 代码。只有右侧链路会碰到交易接口，而且必须先经过风控层。
 
@@ -737,6 +737,59 @@ python scripts/run.py resume          # 只能由你恢复
 - BLS 要求自动程序的 User-Agent 带联系方式，需要你在 `/etc/s03/events.env` 里填一个邮箱。
 - 信号稀少的问题仍在，应先用研究矩阵算出 2021–2025 年每年的交易笔数。
 - 外部心跳监控需要另一台机器，未实际部署。
+
+## 19. 研究前端（v2.2）：找想法、筛因子、统计检验
+
+v2.1 把 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项强项接进了框架，入口是 `python3 scripts/run.py lab …`，代码在 `fwresearch/`（与 freqtrade 模板共用）。交易逻辑、回测口径和上线门槛仍由本框架负责；Vibe-Trading 的回测按“下一根开盘调仓”成交、不模拟止损单，只用于粗筛。
+
+| 环节 | 用什么 | 由谁执行 |
+| --- | --- | --- |
+| 找想法 | Vibe-Trading 本体（大模型研究、多智能体讨论、读网页 / 文档、行情与宏观数据），经 `mcp-guard` 白名单代理接给 `s03-research` | 研究 agent、你 |
+| 筛因子 | 内置 55 个因子（OHLCV、资金费率）；可选调用 Vibe-Trading 的 478 个因子 | 程序 |
+| 回测 | `s03/research/replay.py` 15 分钟逐笔回放 + 研究矩阵 | 程序 |
+| 统计检验 | 从 Vibe-Trading 移植的检验 + 逐笔 R 的补充检验 | 程序 |
+| 批准 | 想法登记簿的 `approved`，并把策略写进第 4–5 节 | 只能是你 |
+
+**一条想法的流程：**
+
+1. 登记（`lab idea add`）：假设、机制、证伪条件三项必填。记录只追加，不能改写。
+2. 筛因子（`lab factors`）：只有 alive / reversed 且经 FDR 多重检验仍显著的因子才算候选。
+3. 回测：写成策略插件跑研究矩阵；每进入一次 backtesting 都计入尝试次数。
+4. 统计检验（`lab matrix`）：结论“通过”才能改为 validated，否则 rejected 并写原因。
+5. 批准：只能由你在终端用 `--by human` 执行；agent 路径会被拒绝。之后仍须走完 G6–G9。
+
+**新增的统计门槛（补充第 6 节的 G1 / G3 / G4 / G5，已写入仓库 docs/STRATEGY\_TEMPLATE.md 第 10 节）：**
+
+| 检验 | 判定 | 阈值标注 |
+| --- | --- | --- |
+| 期望 R 的 Bootstrap 95% 区间 | 下限 > 0 | 示例值 |
+| 符号翻转检验 | p < 0.05 | 示例值 |
+| 滚动分段（5 段） | 期望 R > 0 的段数 ≥ 60% | 示例值 |
+| Deflated Sharpe（按尝试次数折扣） | > 0.95 | 示例值 |
+| PBO（过拟合概率） | < 0.5 | 示例值 |
+| Monte Carlo 排列 | 只报告回撤路径，不判定优势 | — |
+
+**已核验事实：** Deflated Sharpe、PBO、BH 多重检验与截面 IC 的计算结果，与 Vibe-Trading 原代码（提交 d01ea76）逐项比对一致。
+
+**v2.2：加入 HYPE，默认用跨币种比较。** 默认标的变为 BTC、ETH、SOL、BNB、HYPE（Hyperliquid 平台最大杠杆 HYPE 10 倍，API 实测）。满 5 个币时，筛因子自动用截面 IC：每个时刻把 5 个币按因子值排序，看它和之后收益的排序是否一致。它检验的是“在几个币之间挑强弱”，不检验择时；择时型策略加 `--mode time_series`。只有 5 个币同时有数据的日期才计入：HYPE 永续在 OKX 2025-02-21 上市，样本从此开始。新增观测数下限（截面 60、时间序列 12 个月，示例值）：资金费因子曾只用 6 个观测就得到 FDR 显著，现记为“样本不足”。
+
+**真实数据试跑（2026-10-28，OKX 永续日线，613 个日期）：** 内置 55 个 + Vibe-Trading 408 个 = 463 个因子，0 个通过 FDR、15 个名义 reversed、14 个样本不足。不到两年、高度相关的 5 个币不足以支持任何因子结论，这是预期内的结果。
+
+**安全边界：** Vibe-Trading 装在独立虚拟环境（固定 0.1.18）；`mcp-guard` 只放行 26 个研究工具，`trading_*`、`paper_trade_step`、`write_file` 等一律拒绝，子进程拿不到交易所密钥，每次调用写审计日志；只有 `s03-research` 能用。不装 Vibe-Trading 也能用筛因子、统计检验和想法登记簿。详见仓库 `docs/RESEARCH_LAB.md`。
+
+**v2.2 安装验证（2026-10-28，vibe-trading-ai 0.1.18 + OpenClaw 2026.10.8）与因此修改的配置：**
+
+| 项目 | 实测 | 处理 |
+| --- | --- | --- |
+| MCP 握手与白名单 | 服务器提供 82 个工具，代理放行 26 个；交易、模拟盘、写文件工具均被拒绝；密钥未传入 | 无 |
+| 因子库桥接 | pickle 跨环境失败（缺 pyarrow）；83 个因子缺 vwap / amount 列 | 改用 npz + JSON；用典型价、volume×close 近似补列（模型推断） |
+| OpenClaw 沙箱闸门 | doctor 告警：研究 agent 在沙箱里，MCP 工具会被过滤 | 研究 agent 加 `tools.sandbox.tools.alsoAllow: ["vibe-trading__*"]` |
+| Codex 投射范围 | 不写 `codex.agents` 时会投射给所有 Codex 运行时 agent | 加 `codex: { agents: ["s03-research"] }` |
+| 配置校验 | `openclaw config patch --dry-run` 通过；`mcp probe` 26 个工具；命令白名单可直接导入 | 去掉“核对”标记 |
+| 环境要求 | OpenClaw 2026.10.8 需 Node ≥ 24.22.1 或 ≥ 26.12.1；Vibe-Trading 需 Python ≥ 3.11，独立虚拟环境约 1.1 GB | 写入 README |
+| 未验证 | `run_swarm` 需要大模型配置（本次未配）；`web_search` 在验证机网络下无结果 | 待你在自己的服务器上确认 |
+
+Vibe-Trading 的加密行情是 OKX 现货、按 UTC+8 切日，与本框架的永续、UTC 切日数据不同，只用于找想法。装好后用 `python3 scripts/run.py lab vt-check` 一条命令复查全部项目。完整记录见仓库 `docs/RESEARCH_LAB.md`。
 
 ## 来源
 

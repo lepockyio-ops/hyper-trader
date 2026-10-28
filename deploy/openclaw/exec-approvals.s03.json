@@ -1,5 +1,5 @@
 {
-  "_说明": "OpenClaw 命令执行白名单（按 agent）。官方文档：审批策略存于执行主机的共享状态数据库，可用 openclaw 的 approvals 命令或 doctor 导入；pattern 为可执行文件路径或命令名的 glob，argPattern 为对参数（不含 argv[0]）的 ECMAScript 正则，参数以单个空格连接。审批不是权限边界，真正的限制来自 sudoers、文件权限和沙箱。本文件仅以 _ 开头的键是注释，导入前删除。",
+  "_说明": "OpenClaw 命令执行白名单（按 agent）。官方文档：审批策略存于执行主机的共享状态数据库，可用 openclaw 的 approvals 命令或 doctor 导入；pattern 为可执行文件路径或命令名的 glob，argPattern 为对参数（不含 argv[0]）的 ECMAScript 正则，参数以单个空格连接。审批不是权限边界，真正的限制来自 sudoers、文件权限和沙箱。本文件以 _ 开头的键是注释。导入：openclaw approvals set --file <本文件>（OpenClaw 2026.10.8 实测可直接导入，注释键会被忽略）。",
   "version": 1,
   "defaults": {
     "security": "deny",
@@ -65,6 +65,14 @@
         {
           "pattern": "python3",
           "argPattern": "^-m s03\\.events_calendar --out [A-Za-z0-9_./-]+\\.json( --history)?$"
+        },
+        {
+          "pattern": "python3",
+          "argPattern": "^scripts/run\\.py lab (factors|stats|matrix)( [A-Za-z0-9_.=:/,-]+)*$"
+        },
+        {
+          "pattern": "python3",
+          "argPattern": "^scripts/run\\.py lab idea (add|list|show|move|attach|trials)(?!.*--by human)(?!.*--approver)( [^\\n]{1,2000})?$"
         },
         {
           "pattern": "python3",

@@ -13,6 +13,12 @@
   python scripts/run.py gate              # OpenClaw 白名单代理：只有 GET /status 与 POST /pause
   python scripts/run.py pause "原因"       # 暂停新开仓（不撤止损、不平仓）
   python scripts/run.py resume            # 恢复新开仓（只能由你手动执行）
+  python scripts/run.py lab <命令> ...      # 研究前端（找想法、筛因子、统计检验），见 docs/RESEARCH_LAB.md：
+        lab factors [--coins BTC,ETH] [--tf 1d]     # 默认读 research/data（research_matrix.py fetch 生成）
+        lab stats --trades research/results/trades/BTC-2024-A-base.csv
+        lab matrix                                  # 研究矩阵：Bootstrap、符号翻转、滚动分段、DSR、PBO、成本压力
+        lab idea add|list|show|move|attach|trials
+        lab vt-check [--vt-bin /opt/s03/vt-venv/bin]   # Vibe-Trading 安装自检
 """
 from __future__ import annotations
 
@@ -26,10 +32,24 @@ import pandas as pd  # noqa: E402
 from s03.config import load_settings  # noqa: E402
 
 
+def lab(args: list[str]) -> int:
+    """研究前端。factors 默认读 hyper-trader 的 research/data；approved 只能由人在终端用 --by human 执行。"""
+    from fwresearch.__main__ import main as fw_main
+
+    if args and args[0] == "factors" and "--source" not in args:
+        args = [*args, "--source", "hl", "--data-dir", "research/data"]
+    if args and args[0] == "mcp-guard":
+        print("mcp-guard 由 OpenClaw 配置启动，不从这里运行")
+        return 2
+    return fw_main(args)
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     cmd = sys.argv[1]
+    if cmd == "lab":
+        sys.exit(lab(sys.argv[2:]))
     s = load_settings()
     if cmd in ("loop", "once"):
         from s03.live.loop import LiveLoop

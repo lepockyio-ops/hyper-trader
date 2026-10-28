@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# 研究前端：由 OpenClaw Gateway 启动的 Vibe-Trading MCP 服务器（只给 s03-research 用）。
+# 经 fwresearch 的 mcp-guard 白名单代理启动：交易、连接器、写文件类工具一律被拒绝，子进程拿不到交易所密钥。
+# 前提：Vibe-Trading 装在独立虚拟环境 /opt/s03/vt-venv（pip install vibe-trading-ai==0.1.18）。
+set -euo pipefail
+ENV_FILE=/etc/s03/vibe-trading.env          # 只放大模型的 API Key 等研究用配置（root:openclaw 0640），不要放交易所密钥
+if [[ -r "$ENV_FILE" ]]; then set -a; . "$ENV_FILE"; set +a; fi
+export VIBE_TRADING_HOME="${VIBE_TRADING_HOME:-/srv/s03-research/.vibe-trading}"
+export VIBE_TRADING_ALLOWED_RUN_ROOTS="${VIBE_TRADING_ALLOWED_RUN_ROOTS:-/srv/s03-research/vt-runs}"
+mkdir -p "$VIBE_TRADING_HOME" "$VIBE_TRADING_ALLOWED_RUN_ROOTS" /srv/s03-research/research/lab
+cd /srv/s03-research
+# PYTHONPATH 指向只读的代码目录（root 所有），不用研究副本里的 fwresearch，避免被研究 agent 改写
+exec env PYTHONPATH=/opt/s03/hl-s03 /opt/s03/venv/bin/python -m fwresearch mcp-guard \
+  --audit /srv/s03-research/research/lab/mcp-audit.log -- /opt/s03/vt-venv/bin/vibe-trading-mcp

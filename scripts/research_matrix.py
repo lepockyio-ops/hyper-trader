@@ -1,11 +1,15 @@
 """研究矩阵：把回测拆成“标的 × 年份 × 实现 × 方案”的独立任务，便于 s03-research 派生子 agent 并行；
 另有复核命令，供“复核子 agent”用全新上下文重跑并比对。所有数字都来自程序输出，AI 只负责分派和解读。
 
-  python scripts/research_matrix.py fetch --coins BTC,ETH,SOL,BNB --since 2021-01-01     # 一次性缓存 OKX 历史
+  python scripts/research_matrix.py fetch --coins BTC,ETH,SOL,BNB,HYPE --since 2021-01-01     # 一次性缓存 OKX 历史
   python scripts/research_matrix.py plan  --years 2022-2025 --impl A --variants base,stop_floor,cost2x
   python scripts/research_matrix.py run   --job SOL-2023-A-base                         # 子 agent 各跑一格
   python scripts/research_matrix.py aggregate                                           # 汇总 → research/matrix_report.md
   python scripts/research_matrix.py verify --job SOL-2023-A-base                        # 复核：重跑并比对哈希
+  python scripts/run.py lab matrix                                                      # 统计检验：DSR、PBO、Bootstrap（docs/RESEARCH_LAB.md）
+
+每个任务的逐笔交易另存 research/results/trades/<任务>.csv（列 job, coin, year, impl, variant, entry_time, time, R, pnl），
+供 fwresearch 做统计检验。同一个结果目录里只放一种实现（impl），否则不同实现会被当成同一个方案合并。
 
 方案（variants）：
   base        当前参数
@@ -31,7 +35,7 @@ from s03.config import load_settings  # noqa: E402
 
 ROOT = Path("research")
 DATA, RES = ROOT / "data", ROOT / "results"
-PLATFORM_MAX = {"BTC": 40, "ETH": 25, "SOL": 20, "BNB": 10}   # 2026-10-25 快照
+PLATFORM_MAX = {"BTC": 40, "ETH": 25, "SOL": 20, "BNB": 10, "HYPE": 10}   # 2026-10-28 快照（Hyperliquid meta）
 VARIANTS = ("base", "stop_floor", "cost2x")
 
 
@@ -108,15 +112,36 @@ def run_job(jid: str) -> dict:
     trades, summary = run_replay(coin, daily_y, bars_y, s, PLATFORM_MAX[coin], impl=impl,
                                  warmup_days=max(30, min(warm, 400)))
     csv = trades.to_csv(index=False).encode()
-    return {"job": jid, "status": "ok", "coin": coin, "year": year, "impl": impl, "variant": variant,
+    return {"_trades": trades, "job": jid, "status": "ok", "coin": coin, "year": year, "impl": impl, "variant": variant,
             "bars": int(len(bars_y)), "data_hash": {b: file_hash(DATA / f"{coin}_{b}.csv") for b in ("1Dutc", "15m")},
             "trades_hash": hashlib.sha256(csv).hexdigest()[:16], "n_trades": int(len(trades)),
             "summary": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in summary.items()}}
 
 
+def save_trades(jid: str, trades: pd.DataFrame) -> Path:
+    """逐笔交易的标准格式（fwresearch 读取）：time = 平仓时间，R = 盈亏 ÷ 初始风险。"""
+    coin, year, impl, variant = parse_job(jid)
+    d = RES / "trades"
+    d.mkdir(parents=True, exist_ok=True)
+    cols = ["job", "coin", "year", "impl", "variant", "entry_time", "time", "R", "pnl"]
+    if trades is None or trades.empty:
+        out = pd.DataFrame(columns=cols)
+    else:
+        out = trades.rename(columns={"exit_time": "time"})[["entry_time", "time", "R", "pnl"]].copy()
+        out.insert(0, "variant", variant)
+        out.insert(0, "impl", impl)
+        out.insert(0, "year", year)
+        out.insert(0, "coin", coin)
+        out.insert(0, "job", jid)
+    p = d / f"{jid}.csv"
+    out[cols].to_csv(p, index=False)
+    return p
+
+
 def cmd_run(a) -> int:
     RES.mkdir(parents=True, exist_ok=True)
     out = run_job(a.job)
+    save_trades(a.job, out.pop("_trades", None))
     (RES / f"{a.job}.json").write_text(json.dumps(out, ensure_ascii=False, indent=1, default=str), "utf-8")
     print(json.dumps({k: out.get(k) for k in ("job", "status", "n_trades", "trades_hash")}, ensure_ascii=False))
     return 0
@@ -125,6 +150,7 @@ def cmd_run(a) -> int:
 def cmd_verify(a) -> int:
     stored = json.loads((RES / f"{a.job}.json").read_text("utf-8"))
     fresh = run_job(a.job)
+    fresh.pop("_trades", None)
     same = (stored.get("trades_hash") == fresh.get("trades_hash") and stored.get("data_hash") == fresh.get("data_hash"))
     print(json.dumps({"job": a.job, "match": same, "stored": stored.get("trades_hash"),
                       "fresh": fresh.get("trades_hash")}, ensure_ascii=False))
@@ -176,10 +202,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch")
-    f.add_argument("--coins", default="BTC,ETH,SOL,BNB")
+    f.add_argument("--coins", default="BTC,ETH,SOL,BNB,HYPE")
     f.add_argument("--since", default="2021-01-01")
     p = sub.add_parser("plan")
-    p.add_argument("--coins", default="BTC,ETH,SOL,BNB")
+    p.add_argument("--coins", default="BTC,ETH,SOL,BNB,HYPE")
     p.add_argument("--years", default="2022-2025")
     p.add_argument("--impl", default="A")
     p.add_argument("--variants", default="base,stop_floor,cost2x")

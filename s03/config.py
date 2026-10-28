@@ -25,7 +25,7 @@ MAINNET_GATE_VALUE = "I_HAVE_PASSED_G1_TO_G8"
 @dataclass(frozen=True)
 class StrategyConfig:
     """框架层的策略设置。具体交易规则在插件里（s03/strategy/api.py），参数放 [strategy.params]。"""
-    coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB")   # 示例标的，按你的策略修改
+    coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB", "HYPE")   # 示例标的，按你的策略修改
     # 策略插件（"模块:类名"）。默认是空白模板：不会产生任何入场
     plugin: str = "s03.strategies.template:BlankStrategy"
     params: dict = field(default_factory=dict)              # 传给插件的参数

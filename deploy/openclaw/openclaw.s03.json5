@@ -11,6 +11,31 @@
     allowRequestSessionKey: false,
   },
 
+  // 研究前端：Vibe-Trading 的 MCP 服务器，只给 s03-research 用。
+  // v2.2 已用 OpenClaw 2026.10.8 实测（config patch --dry-run 通过、mcp probe 列出 26 个工具、doctor 无相关告警），
+  // 记录见 docs/RESEARCH_LAB.md 的“安装验证记录”。
+  // 两层限制：toolFilter 只列研究工具；启动命令本身是 fwresearch 的 mcp-guard 白名单代理，交易类工具一律拒绝。
+  // MCP 服务器在 Gateway 主机上运行（不在研究沙箱里）。没有安装 /opt/s03/vt-venv 时保持 enabled: false。
+  mcp: {
+    servers: {
+      "vibe-trading": {
+        enabled: false,                                     // 装好 Vibe-Trading 后改为 true（install.sh --with-vibe-trading）
+        command: "/usr/local/lib/s03/s03-vt-mcp",           // 包装脚本：读 /etc/s03/vibe-trading.env，经 mcp-guard 启动
+        args: [],
+        cwd: "/srv/s03-research",
+        // 不写 codex.agents 时，OpenClaw 会把这个服务器投射给所有 Codex 运行时的 agent（schema 说明，2026.10.8）
+        codex: { agents: ["s03-research"] },
+        toolFilter: {
+          include: ["add_goal_evidence", "alpha_bench", "alpha_zoo", "backtest", "factor_analysis", "get_macro_series",
+            "get_market_data", "get_research_goal", "get_run_result", "get_strategy_evidence", "get_swarm_status",
+            "list_runs", "list_skills", "list_strategies", "list_swarm_presets", "load_skill", "pattern_recognition",
+            "query_strategies", "read_document", "read_run_artifact", "read_url", "run_swarm", "search_symbol",
+            "start_research_goal", "update_research_goal_status", "web_search"],
+        },
+      },
+    },
+  },
+
   agents: {
     ownership: "explicit",
     defaults: {
@@ -30,7 +55,7 @@
         sandbox: { mode: "off" },                      // 需要在主机上调用 sudo systemctl；能力由 sudoers 白名单限定
         tools: {
           allow: ["exec", "read", "message"],
-          deny: ["write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+          deny: ["vibe-trading__*", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
         },
       },
 
@@ -41,7 +66,7 @@
         sandbox: { mode: "off" },                      // 需要调用主机上的 /usr/local/bin/s03-gate
         tools: {
           allow: ["exec", "message"],
-          deny: ["read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+          deny: ["vibe-trading__*", "read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
         },
       },
 
@@ -51,7 +76,9 @@
         workspace: "/srv/s03-research",
         sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },  // 沙箱镜像需装好 Python 依赖（核对）
         tools: {
-          allow: ["read", "write", "edit", "exec", "sessions_spawn"],
+          allow: ["vibe-trading__*", "read", "write", "edit", "exec", "sessions_spawn"],   // MCP 工具的规范名是 <服务器>__<工具>（已核对）
+          // 研究 agent 跑在沙箱里：沙箱还有一道工具闸门，不放行的话 MCP 工具会在发给模型前被过滤（doctor 实测告警）
+          sandbox: { tools: { alsoAllow: ["vibe-trading__*"] } },
           deny: ["process", "browser", "gateway", "message"],
         },
         subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-research"] },   // allowAgents 的取值格式（核对）
@@ -64,7 +91,7 @@
         sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },
         tools: {
           allow: ["read", "write", "sessions_spawn", "message"],
-          deny: ["exec", "process", "edit", "apply_patch", "browser", "gateway"],
+          deny: ["vibe-trading__*", "exec", "process", "edit", "apply_patch", "browser", "gateway"],
         },
         subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-review"] },
       },

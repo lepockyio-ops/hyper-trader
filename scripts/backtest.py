@@ -17,7 +17,7 @@ from s03.config import load_settings  # noqa: E402
 from s03.data import okx_ref  # noqa: E402
 from s03.research.replay import run_replay  # noqa: E402
 
-PLATFORM_MAX = {"BTC": 40, "ETH": 25, "SOL": 20, "BNB": 10}   # 2026-10-25 快照，实盘以 meta 为准
+PLATFORM_MAX = {"BTC": 40, "ETH": 25, "SOL": 20, "BNB": 10, "HYPE": 10}   # 2026-10-28 快照（Hyperliquid meta），实盘以 meta 为准
 
 
 def main() -> None:

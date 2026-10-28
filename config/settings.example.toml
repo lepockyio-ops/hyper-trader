@@ -14,7 +14,7 @@ action_expires_sec = 10
 #   示例策略（只用于验证框架）：s03.strategies.examples.sma_cross:SmaCrossExample
 #   你的策略：复制 s03/strategies/template.py，例如 s03.strategies.my_strategy:MyStrategy
 plugin = "s03.strategies.template:BlankStrategy"
-coins = ["BTC", "ETH", "SOL", "BNB"]   # 示例标的，按你的策略修改
+coins = ["BTC", "ETH", "SOL", "BNB", "HYPE"]   # 示例标的，按你的策略修改
 entry_impl = "A"                       # A：突破触发单 | B：收盘确认后限价
 stop_min_pct = 0.8                     # 框架止损护栏（示例值）
 stop_max_pct = 3.0

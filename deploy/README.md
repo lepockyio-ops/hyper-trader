@@ -51,7 +51,7 @@ chown openclaw:openclaw /etc/s03/openclaw/gate.token && chmod 0400 /etc/s03/open
 # 4. 工作目录
 install -d -m 2750 -o s03trader -g openclaw /srv/s03-review/inbox
 install -d -m 0750 -o openclaw -g openclaw /srv/s03-research
-cp -r /opt/s03/hl-s03/{s03,scripts,tests,config,requirements.txt} /srv/s03-research/ && chown -R openclaw: /srv/s03-research
+cp -r /opt/s03/hl-s03/{s03,scripts,tests,config,fwresearch,docs,requirements.txt} /srv/s03-research/ && chown -R openclaw: /srv/s03-research
 
 # 5. 小工具、systemd、sudoers
 install -m 0755 /opt/s03/hl-s03/deploy/bin/s03-gate /usr/local/bin/s03-gate
@@ -101,3 +101,24 @@ systemctl start s03-events.service && cat /var/lib/s03-events/events.json | head
 - OpenClaw 配置键名来自 2026-10-26 的官方文档；子 agent 的 `allowAgents` 取值格式、嵌套层级设置、沙箱镜像依赖和网络要按你的版本核对。
 - s03-ops 不在沙箱里（需要调用主机 sudo），它的 `read` 工具能读 openclaw 用户能读的文件，包括 OpenClaw 自己的配置。所以它的输入只来自你自己的服务和定时器，不要把它接到公开频道。
 - `/etc/s03/openclaw/gate.token` 对 openclaw 用户可读：泄露后最多只能查看状态和暂停新开仓。
+
+## 可选：研究前端接入 Vibe-Trading（v2.1）
+
+只给研究 agent（s03-research）找想法用；不装也不影响筛因子、统计检验与想法登记簿。步骤与安全设计见 `docs/RESEARCH_LAB.md`。
+
+```bash
+python3 -m venv /opt/s03/vt-venv && /opt/s03/vt-venv/bin/pip install "vibe-trading-ai==0.1.18"
+install -m 0755 /opt/s03/hl-s03/deploy/bin/s03-vt-mcp /usr/local/lib/s03/s03-vt-mcp
+install -m 0640 -o root -g openclaw /opt/s03/hl-s03/deploy/env/vibe-trading.env.example /etc/s03/vibe-trading.env
+install -d -o openclaw -g openclaw -m 0750 /srv/s03-research/vt-runs /srv/s03-research/research/lab
+```
+然后把 OpenClaw 配置中 `mcp.servers["vibe-trading"].enabled` 改为 `true`，再依次运行：
+
+```bash
+sudo -u openclaw env VIBE_TRADING_HOME=/srv/s03-research/.vibe-trading \
+  PYTHONPATH=/opt/s03/hl-s03 /opt/s03/venv/bin/python -m fwresearch vt-check --vt-bin /opt/s03/vt-venv/bin   # ok: true
+openclaw mcp probe vibe-trading      # 应显示 26 个工具
+openclaw doctor                      # 不应再有“沙箱会过滤 MCP 工具”的告警
+```
+
+OpenClaw 2026.10.8 需要 Node ≥ 24.22.1 或 ≥ 26.12.1。验证记录见 `docs/RESEARCH_LAB.md`。

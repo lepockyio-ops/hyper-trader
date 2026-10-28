@@ -26,9 +26,15 @@
 默认插件是空白模板 `BlankStrategy`：框架可以完整运行（影子模式、告警、复盘、OpenClaw），但不会产生任何入场；
 交易主循环启动时会写一条 `strategy_not_configured` 告警。
 
+## 研究前端（v2.2：找想法 → 筛因子 → 回测 → 统计检验）
+
+`fwresearch/`（两个模板共用）提供想法登记簿、内置因子库（55 个）与因子检验（5 个币时默认跨币种比较）、逐笔 R 的统计检验（Bootstrap、符号翻转、滚动分段、
+Deflated Sharpe、PBO）。找想法可选接入 Vibe-Trading，经 `mcp-guard` 白名单代理，只给研究 agent 用，交易类工具一律拒绝。
+入口：`python3 scripts/run.py lab …`；详见 `docs/RESEARCH_LAB.md`。
+
 ## 上线顺序（与策略无关）
 
-研究矩阵回测 → G0–G6 → 影子模式 → 测试网必测 5 项 → 测试网 live ≥ 4 周（G8）→ 你手动解锁主网、小额实盘（G9）。
+登记想法 → 筛因子 → 研究矩阵回测 → 统计检验（`lab matrix`）→ G0–G6 → 影子模式 → 测试网必测 5 项 → 测试网 live ≥ 4 周（G8）→ 你手动解锁主网、小额实盘（G9）。
 
 ## 命名
 
