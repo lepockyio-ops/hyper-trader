@@ -1,0 +1,30 @@
+[Unit]
+Description=S03 新闻采集（Odaily + BlockBeats 两家同时）：存档快讯并生成按币种的事件守卫 news_blocks.json（只收紧）
+After=network-online.target
+Wants=network-online.target
+# 不设 OnFailure：接口偶发失败时守卫文件会过期，交易程序会忽略它并记日志（s03ft status / 日志可见），不必每 5 分钟唤醒 agent
+
+[Service]
+Type=oneshot
+User=s03trader
+Group=s03trader
+WorkingDirectory=/opt/s03/hl-s03
+StateDirectory=s03-news
+StateDirectoryMode=0755
+EnvironmentFile=/etc/s03/blockbeats.env
+Environment=S03_NEWS_SOURCES=odaily,blockbeats
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/s03/venv/bin/python -m fwresearch news collect --archive /var/lib/s03-news/archive --guard-out /var/lib/s03-news/news_blocks.json
+TimeoutStartSec=120
+ReadWritePaths=/var/lib/s03-news
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0022

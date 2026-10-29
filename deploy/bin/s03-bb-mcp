@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# 研究前端：由 OpenClaw Gateway 启动的 BlockBeats 官方 MCP 服务器（只给 s03-research 用）。
+# 经 fwresearch 的 mcp-guard 启动：只放行 deploy/openclaw/blockbeats-mcp.allow 里的 18 个只读工具；
+# 子进程只拿到白名单环境变量和 BLOCKBEATS_API_KEY，拿不到任何交易所密钥。
+# 前提：s03-install-blockbeats-mcp 已安装到 /opt/s03/bb-mcp（固定 1.0.4，已改为 HTTPS）。
+set -euo pipefail
+ENV_FILE=/etc/s03/blockbeats.env            # BLOCKBEATS_API_KEY=…（root:openclaw 0640）；不要放交易所密钥
+if [[ -r "$ENV_FILE" ]]; then set -a; . "$ENV_FILE"; set +a; fi
+JS=/opt/s03/bb-mcp/node_modules/blockbeats-mcp/dist/index.js
+if grep -q 'http://api-pro' "$JS"; then echo "拒绝启动：$JS 仍使用 http://（请重新运行 s03-install-blockbeats-mcp）" >&2; exit 1; fi
+mkdir -p /srv/s03-research/research/lab
+exec env PYTHONPATH=/opt/s03/hl-s03 /opt/s03/venv/bin/python -m fwresearch mcp-guard \
+  --allow-file /opt/s03/hl-s03/deploy/openclaw/blockbeats-mcp.allow --pass-env BLOCKBEATS_API_KEY \
+  --audit /srv/s03-research/research/lab/mcp-audit-blockbeats.log -- node "$JS"

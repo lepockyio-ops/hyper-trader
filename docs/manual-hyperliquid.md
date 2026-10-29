@@ -1,4 +1,4 @@
-# 交易框架模板手册（Hyperliquid 永续 · 策略留空 v2.2）
+# 交易框架模板手册（Hyperliquid 永续 · 策略留空 v2.5）
 
 Oct 28, 2026 · @Pocky
 
@@ -738,7 +738,7 @@ python scripts/run.py resume          # 只能由你恢复
 - 信号稀少的问题仍在，应先用研究矩阵算出 2021–2025 年每年的交易笔数。
 - 外部心跳监控需要另一台机器，未实际部署。
 
-## 19. 研究前端（v2.2）：找想法、筛因子、统计检验
+## 19. 研究前端（v2.2–v2.5）：找想法、筛因子、统计检验
 
 v2.1 把 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项强项接进了框架，入口是 `python3 scripts/run.py lab …`，代码在 `fwresearch/`（与 freqtrade 模板共用）。交易逻辑、回测口径和上线门槛仍由本框架负责；Vibe-Trading 的回测按“下一根开盘调仓”成交、不模拟止损单，只用于粗筛。
 
@@ -790,6 +790,54 @@ v2.1 把 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项
 | 未验证 | `run_swarm` 需要大模型配置（本次未配）；`web_search` 在验证机网络下无结果 | 待你在自己的服务器上确认 |
 
 Vibe-Trading 的加密行情是 OKX 现货、按 UTC+8 切日，与本框架的永续、UTC 切日数据不同，只用于找想法。装好后用 `python3 scripts/run.py lab vt-check` 一条命令复查全部项目。完整记录见仓库 `docs/RESEARCH_LAB.md`。
+
+### BlockBeats（律动）新闻：有限接入（v2.3）
+
+**结论（模型推断）：** 只接两种用途——实盘的“事件守卫”（只会阻止开仓，不会触发交易）和研究用的新闻归档。不把新闻当买卖信号：BlockBeats Pro API 没有情绪字段、没有币种标签，历史快讯也无法补齐，现在用它做信号既不能回测，也会引入未验证的规则。
+
+| 优势 | 劣势 / 风险 |
+| --- | --- |
+| 中文加密快讯更新快，能覆盖被盗、下架、监管、提现暂停等事件 | 需付费 API 密钥；返回格式、限频尚未用真实密钥核验（未知） |
+| 事件守卫只收紧风控，出错时退回“无守卫”而不是乱下单 | 关键词分类会漏报和误报；新闻无法回测，守卫不进入回测 |
+| 归档从今天起积累，日后可当因子检验（`news:n_news` 等） | 新闻文本是不可信输入，可能含提示注入；官方 MCP 默认用明文 http |
+
+**采用 / 不采用：**
+
+- `blockbeats-MCP`（npm `blockbeats-mcp@1.0.4`）：采用，但安装脚本把 `http://` 改成 `https://`（已核验事实：原包 BASE\_URL 为 http，服务器在 http 下直接返回 200 不跳转，密钥会明文传输），并通过 `mcp-guard` 白名单只放行 18 个只读工具，只给研究 agent。
+- `blockbeats-skill`：不采用。它让 agent 自己用 curl 拼接密钥请求（密钥可能出现在命令行和日志），并附带未经验证的买卖规则。
+- `RESTful-API`：不采用，仅有旧版 README，旧域名不可达。
+
+**实现：** `fwresearch/blockbeats.py`（标准库）；`python -m fwresearch news collect|data|daily|blocks|check`；systemd `s03-news.timer`（5 分钟采集）与 `s03-news-data.timer`；`settings.toml` 的 `news_file`、`news_venue = "hyperliquid"`、`news_max_age_min = 30`（示例值）。守卫按币种或 `@hyperliquid` 阻止开仓，阻止时长：被盗 24 h、下架 72 h、监管 12 h、提现暂停 12 h、脱锚 6 h、宕机 6 h、解锁 6 h（均为示例值）。文件超过 30 分钟未更新即视为 stale，守卫失效并写日志 `news_guard_degraded`。
+
+**验证：** 用假密钥经 HTTPS 访问得到 “Invalid API key”（状态 101），错误信息不含密钥；经代理 `mcp probe` 显示 18 个工具，`write_file` / `trading_*` 被拦截；OpenClaw `config patch --dry-run` 与 `mcp doctor` 通过；测试 181 通过。**未验证：** 真实密钥下的返回、限频、时间格式——拿到密钥后先在服务器运行 `news check`。
+
+### 新闻来源：BlockBeats 与 Odaily 同时接入（v2.4）
+
+**结论：** 用真实 BlockBeats Key 和 Odaily 公开接口实测后，两家同时接入、各有分工。接入前先重写了事件规则：v2.3 的规则用最近一周快讯回放时，ETH 有 88% 的时间被封、BTC 56%，几乎全是误报。
+
+| 项目 | BlockBeats | Odaily |
+| --- | --- | --- |
+| 费用 | 付费 Key | 免费，无 Key |
+| 快讯历史（已核验） | 约 16.8 万条，可回填到 2020-01 | 约 38 万条，可回填到 2018-05 |
+| 速度（同一周） | 发布时间中位差约 30 秒，可视为一样快 | 略早 |
+| 结构化数据 | ETF 资金流、稳定币市值、合约持仓等 10 个接口可用 | 无 |
+| 分工 | 实盘守卫第二来源；市场数据因子；研究 agent 的 MCP | 实盘守卫主来源；新闻因子与事件研究（只用这一家，避免重复计数） |
+
+**新规则（示例值）：** 只看标题；被盗 / 宕机按币种封禁时币种必须是主语（“Solana 网络…”）；下架 / 解锁要求币种紧挨风险词，交易对下架不算；交易所暂停个别代币充提不封整个交易所；排除汇总帖和已恢复 / 否认 / 未受影响类标题。修正后同一周封禁占比为 0；6 个历史事件里命中 Solana 主网停摆、Hyperliquid 朝鲜黑客地址、币安认罪和解、Hyperliquid 订单系统故障，其中 2 个只有一家的标题能识别。规则是在少量样本上人工调的，有过拟合风险（模型推断）。
+
+**上线前：** `python -m fwresearch news backfill --sources odaily --since 2024-01-01` 补历史，再 `news replay --source odaily --since 2024-01-01 --verbose` 看每个币被封多久、封的是不是真事件。回填数据有偏差：删掉的快讯不会出现，“重要”标记可能是事后补的。采集定时器不再依赖 BlockBeats Key：没有 Key 时只用 Odaily。
+
+### v2.5：两家都是必需来源；规则只看正文
+
+**改动（用户设定）：** 采集默认 `odaily,blockbeats`，`/etc/s03/blockbeats.env` 必填；一家某轮失败时守卫状态为 `degraded`，另一家的封禁照常生效，交易程序记 `news_guard_degraded`。事件规则只看正文、不看标题：去掉媒体开头后逐句判断，跳过编号列表式汇总帖、背景回顾句、假设和提醒句、黑客松；资金“存入 / 转入”交易所、“在 Hyperliquid 上交易”、“在 BNB Chain 上铸造”、个人私钥被盗都不算。
+
+| 数据 | v2.4 只看标题 | v2.5 只看正文 |
+| --- | --- | --- |
+| 最近一周（两家合并） | 封禁占比 0 | HYPE 4%，其余 0 |
+| 6 个历史事件（调规则用） | Solana 停摆、币安和解都只有 Odaily 识别 | 两件事两家都识别；另识别出 2023-05 以太坊信标链故障 |
+| 2026-04 至 10 月 Odaily 回放（调规则时没看过，3.3 万条） | 22 次命中，封禁占比最高 2.4% | 48 次命中，最高 3.6% |
+
+**结论（模型推断）：** 只看正文召回更好，误报约翻倍；在没调过规则的 7 个月里，两种规则的命中都以误报为主。封禁总时长占比不到 4%，代价有限；上线前应在更长历史上用 `news replay` 复核。
 
 ## 来源
 

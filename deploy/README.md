@@ -122,3 +122,33 @@ openclaw doctor                      # 不应再有“沙箱会过滤 MCP 工具
 ```
 
 OpenClaw 2026.10.8 需要 Node ≥ 24.22.1 或 ≥ 26.12.1。验证记录见 `docs/RESEARCH_LAB.md`。
+
+## 可选：新闻事件守卫（Odaily + BlockBeats）与研究 MCP（v2.5）
+
+判断与安全设计见 `docs/RESEARCH_LAB.md` 的“新闻来源：BlockBeats 与 Odaily”。只收紧：有重大事件时按币种暂停新开仓；守卫文件超过 30 分钟未更新时交易程序忽略它。
+两家同时采集，都是必需来源：Odaily 是免费公开接口；BlockBeats 需要付费会员的 Key。一家某轮失败时守卫状态为 degraded（另一家照常封禁，并告警）。事件规则只看正文。
+
+```bash
+# 1. BlockBeats Key：只写进服务器上的这个文件，不要贴到聊天、Issue 或命令行参数里
+install -m 0640 -o root -g openclaw /opt/s03/hl-s03/deploy/env/blockbeats.env.example /etc/s03/blockbeats.env   # 编辑填入
+bash -c 'set -a; . /etc/s03/blockbeats.env; cd /opt/s03/hl-s03; /opt/s03/venv/bin/python -m fwresearch news check'  # 两个来源都应 ok: true
+
+# 2. 采集定时器（每 5 分钟两家快讯）+ 每天的市场数据快照（ETF 流入、稳定币市值、合约持仓等）
+install -m 0644 /opt/s03/hl-s03/deploy/systemd/s03-news*.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now s03-news.timer s03-news-data.timer
+
+# 3. 交易程序读取守卫：/etc/s03/settings.toml 的 [strategy] 设 news_file = "/var/lib/s03-news/news_blocks.json"，重启 s03-trader
+
+# 4. 上线前先回放：看规则在过去一段时间会封多久、封的是不是真事件
+cd /opt/s03/hl-s03 && /opt/s03/venv/bin/python -m fwresearch news backfill --sources odaily --archive research/news --since 2024-01-01
+/opt/s03/venv/bin/python -m fwresearch news replay --archive research/news --source odaily --since 2024-01-01 --verbose
+
+# 5. 研究 agent 的官方 BlockBeats MCP（固定 1.0.4，安装时把上游写死的 http:// 改为 https://）
+install -D -m 0755 /opt/s03/hl-s03/deploy/bin/s03-install-blockbeats-mcp /usr/local/lib/s03/s03-install-blockbeats-mcp
+/usr/local/lib/s03/s03-install-blockbeats-mcp /opt/s03/bb-mcp
+install -D -m 0755 /opt/s03/hl-s03/deploy/bin/s03-bb-mcp /usr/local/lib/s03/s03-bb-mcp
+# OpenClaw 配置里把 mcp.servers["blockbeats"].enabled 改为 true，然后：
+openclaw mcp probe blockbeats      # 应显示 18 个工具
+```
+
+服务器需要 Node（OpenClaw 已依赖）。如果服务器经 HTTP 代理上网：Python 采集器会自动使用 `HTTPS_PROXY`；Node 的 fetch 还需要 `NODE_USE_ENV_PROXY=1`。两者都写进 /etc/s03/blockbeats.env 即可（mcp-guard 会放行这两个变量）。

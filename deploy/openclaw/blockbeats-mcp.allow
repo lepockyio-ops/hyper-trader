@@ -1,0 +1,20 @@
+# BlockBeats 官方 MCP（blockbeats-mcp 1.0.4）放行给研究 agent 的工具：全部只读 GET。
+# mcp-guard 会额外拒绝任何交易 / 写文件类工具名，即使写在这里。
+get_newsflash
+get_newsflash_24h
+get_articles
+get_articles_24h
+search_news
+get_btc_etf_flow
+get_daily_onchain_tx
+get_ibit_fbtc_flow
+get_stablecoin_marketcap
+get_compliant_exchange_total
+get_us_treasury_yield
+get_dxy_index
+get_m2_supply
+get_bitfinex_long_positions
+get_contract_oi_data
+get_sentiment_indicator
+get_top10_netflow
+get_exchange_rankings

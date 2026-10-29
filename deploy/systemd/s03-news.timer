@@ -1,0 +1,10 @@
+[Unit]
+Description=每 5 分钟采集一次 BlockBeats 快讯（事件守卫文件 30 分钟不更新即失效）
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

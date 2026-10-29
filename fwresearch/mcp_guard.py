@@ -11,6 +11,7 @@ Vibe-Trading 自身没有“只读模式”开关（它暴露 82 个工具，其
 筛因子（factor_analysis、alpha_zoo、alpha_bench）以及它自己的研究回测与运行结果读取。
 
   python -m fwresearch mcp-guard [--allow-file f] [--audit f] -- /opt/s03/vt-venv/bin/vibe-trading-mcp
+  python -m fwresearch mcp-guard --allow-file deploy/openclaw/blockbeats-mcp.allow --pass-env BLOCKBEATS_API_KEY -- node …/dist/index.js
 
 MCP stdio 传输：每行一个 JSON-RPC 消息（UTF-8，行内不含换行）。
 """
@@ -40,7 +41,8 @@ DENY_PREFIX = ("trading_", "paper_trade", "qveris_execute", "write_file", "adapt
                "retry_run", "reap_stale")
 ENV_KEEP_PREFIX = ("PATH", "HOME", "LANG", "LC_", "TZ", "VIBE_TRADING_", "LANGCHAIN_", "OPENROUTER_", "DEEPSEEK_",
                    "OPENAI_", "ANTHROPIC_", "GROQ_", "OLLAMA_", "GEMINI_", "DASHSCOPE_", "MOONSHOT_", "ZHIPU_",
-                   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+                   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+                   "NODE_EXTRA_CA_CERTS", "NODE_USE_ENV_PROXY")   # Node 的 fetch 只有设置 NODE_USE_ENV_PROXY=1 才走代理
 ENV_DROP_SUBSTR = ("FREQTRADE", "BINANCE", "OKX", "HYPERLIQUID", "HL_", "WALLET", "PRIVATE_KEY", "EXCHANGE",
                    "TRADING_PROFILE", "BROKER")
 
@@ -49,8 +51,9 @@ def allowed(name: str, allow: frozenset[str]) -> bool:
     return name in allow and not name.startswith(DENY_PREFIX)
 
 
-def child_env(src: dict[str, str]) -> dict[str, str]:
-    out = {}
+def child_env(src: dict[str, str], extra_keep: tuple[str, ...] = ()) -> dict[str, str]:
+    """子进程环境：只保留白名单前缀，去掉交易所 / 钱包类变量；extra_keep 是 --pass-env 显式放行的变量名（如 BLOCKBEATS_API_KEY）。"""
+    out = {k: src[k] for k in extra_keep if k in src and not any(s in k.upper() for s in ENV_DROP_SUBSTR)}
     for k, v in src.items():
         if not k.startswith(ENV_KEEP_PREFIX):
             continue
@@ -69,14 +72,14 @@ def load_allow(path: str | None) -> frozenset[str]:
 
 class Guard:
     def __init__(self, cmd: list[str], allow: frozenset[str], audit: str | None = None,
-                 stdin=None, stdout=None, env: dict | None = None):
+                 stdin=None, stdout=None, env: dict | None = None, pass_env: tuple[str, ...] = ()):
         self.allow, self.audit = allow, audit
         self.inp = stdin or sys.stdin.buffer
         self.out = stdout or sys.stdout.buffer
         self.lock = threading.Lock()
         self.list_ids: set = set()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     env=child_env(env if env is not None else dict(os.environ)))
+                                     env=child_env(env if env is not None else dict(os.environ), pass_env))
 
     def _write(self, obj: dict) -> None:
         data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
@@ -143,10 +146,11 @@ class Guard:
 
 def main(argv: list[str]) -> int:
     if "--" not in argv:
-        print("用法：python -m fwresearch mcp-guard [--allow-file f] [--audit f] -- <vibe-trading-mcp 命令>", file=sys.stderr)
+        print("用法：python -m fwresearch mcp-guard [--allow-file f] [--audit f] [--pass-env NAME …] -- <MCP 服务器命令>", file=sys.stderr)
         return 2
     i = argv.index("--")
     opts, cmd = argv[:i], argv[i + 1:]
     allow_file = opts[opts.index("--allow-file") + 1] if "--allow-file" in opts else None
     audit = opts[opts.index("--audit") + 1] if "--audit" in opts else None
-    return Guard(cmd, load_allow(allow_file), audit).run()
+    pass_env = tuple(opts[i + 1] for i, o in enumerate(opts) if o == "--pass-env" and i + 1 < len(opts))
+    return Guard(cmd, load_allow(allow_file), audit, pass_env=pass_env).run()

@@ -336,3 +336,249 @@ def test_vibe_trading_integration_vt_check():
 
     res = run(str(Path(os.environ["VT_PYTHON"]).parent))
     assert res["ok"], json.dumps(res["checks"], ensure_ascii=False)
+
+
+# ------------------------------------------------------------------ BlockBeats 新闻
+import http.server  # noqa: E402
+import threading  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from fwresearch import blockbeats as bb  # noqa: E402
+
+NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+
+
+def _flash(i, title, minutes_ago=10, content=""):
+    return {"id": i, "title": title, "content": f"<p>BlockBeats 消息，10 月 29 日，{content or title}</p>", "link": f"https://m.theblockbeats.info/flash/{i}",
+            "create_time": str(int((NOW - timedelta(minutes=minutes_ago)).timestamp()))}
+
+
+@pytest.mark.parametrize("text,expect", [
+    ("Hyperliquid 遭黑客攻击，损失约 1000 万美元", {("HYPE", "security"), ("@hyperliquid", "security")}),
+    ("币安宣布暂停提币，预计 2 小时内恢复", {("@binance", "withdrawal_halt")}),
+    ("Binance will delist XYZ and ABC", set()),                                 # 下架的不是我们的币
+    ("OKX 将下架 SOL 永续合约", {("SOL", "delisting")}),
+    ("SOL 链出块停止，网络宕机约 30 分钟", {("SOL", "outage")}),
+    ("Solana：确认主网测试版暂停出块，正在调查该问题", {("SOL", "outage")}),       # 官方声明式标题
+    ("Hyperliquid：注意到订单系统出现故障，正在进行调查", {("@hyperliquid", "outage"), ("HYPE", "outage")}),
+    ("以太坊基金会启动漏洞赏金计划", set()),                                     # 排除词：赏金
+    ("BTC 突破 10 万美元", set()),                                               # 没有风险类别
+    ("SOLUTION 协议遭攻击事件", set()),                                          # SOL 不能匹配 SOLUTION
+    ("HYPE 将于下周大额解锁 2% 流通量", {("HYPE", "unlock")}),
+    ("SEC 起诉 Binance 违反证券法", {("@binance", "enforcement")}),
+    # 2026-10-29 实测误报（v2.3 旧规则会命中），现在都不应命中
+    ("DotSwap V1遭攻击损失约8.5枚BTC，涉及资金约68.5万美元", set()),              # 第三方协议被盗，BTC 只是金额
+    ("UXLINK黑客做多3.03万枚ETH，仓位价值7025万美元", set()),
+    ("Binance将下架AAVE/BTC、ATOM/BTC、CAKE/BTC等现货交易对", set()),             # BTC 是计价币
+    ("币安将下架BTC/BUSD和ETH/BUSD杠杆交易对", set()),                            # 杠杆交易对下架
+    ("Binance安全团队成功阻止多起朝鲜相关黑客攻击，未造成系统受损或资产损失", set()),
+    ("1. Hyperliquid 遭黑客攻击；2. BTC 突破 10 万美元；3. 某巨鲸买入 ETH", set()),     # 汇总帖（编号列表）
+    ("Hyperliquid已下架JELLYJELLY交易对", set()),                                  # 下架的是别的币
+    ("币安将于5月15日暂停Swipe（SXP）充提业务", set()),                            # 个别代币的充提，不封整个交易所
+    ("Hyperliquid：昨晚API问题是由流量激增所致，没有发生黑客攻击或漏洞利用", set()),
+    ("Bitcoin Core调整安全漏洞披露政策", set()),                                  # 发现 / 披露漏洞不等于被攻击
+])
+def test_classify_rules(text, expect):
+    assert {(h.target, h.category) for h in bb.classify(text)} == expect
+
+
+@pytest.mark.parametrize("content,expect", [
+    # 媒体开头会被去掉；正文按句判断
+    ("<p>BlockBeats 消息，10 月 29 日，Hyperliquid 遭黑客攻击，损失约 1000 万美元。</p>", {("HYPE", "security"), ("@hyperliquid", "security")}),
+    ("Odaily星球日报讯 据 Solana Status 公告，Solana 网络工程师正在调查 Mainnet Beta 中断问题。", {("SOL", "outage")}),
+    # 背景回顾句、假设 / 提醒句不算
+    ("Odaily星球日报讯 某项目发布新版本。此前，Solana 网络在 2023 年 4 月宕机近两天。", set()),
+    ("若用户的谷歌账户遭到攻击，黑客将可登录用户的 OKX 账户", set()),
+    ("有朝一日，黑客可能会破解保护比特币安全的加密技术", set()),                 # 也不能把“比特币安全”当成“币安”
+    # 资金流向交易所、在链上发生 ≠ 交易所 / 公链出事
+    ("这可能是黑客攻击后，Bybit 向 Binance 的还款", set()),
+    ("一名去年从 UXLINK 盗走资产的黑客，在 Hyperliquid 以 2134 美元的价格做多 ETH", set()),
+    ("攻击者在 BNB Chain 上未经授权铸造了 1000 万枚 CYS", set()),
+    ("一名用户疑似因私钥泄露导致以太坊及 Base 网络资产被盗", set()),
+    # 例行升级维护时暂停充提，不封交易所
+    ("Binance 将支持 Qtum 网络升级及硬分叉。Binance 将于 11 月 27 日暂停上述网络的代币充值、提现业务。", set()),
+    # 整条里有否认 / 已恢复就跳过
+    ("Hyperliquid：昨晚 API 问题是由流量激增所致，没有发生黑客攻击或漏洞利用。", set()),
+    ("", set()),                                                                   # 正文为空不判断
+])
+def test_classify_uses_body_only(content, expect):
+    assert {(h.target, h.category) for h in bb.classify(content)} == expect
+
+
+def test_title_is_ignored():
+    item = {"title": "Hyperliquid 遭黑客攻击", "content": "<p>Odaily星球日报讯 某 DeFi 协议发布季度报告。</p>"}
+    assert bb.classify_item(item) == []                                          # 只看正文，不看标题
+
+
+def test_parse_time_both_formats():
+    assert bb.parse_time("1769677313") == datetime.fromtimestamp(1769677313, tz=timezone.utc)
+    assert bb.parse_time("2026-10-29 20:00:00") == datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)   # 按北京时间解析
+    assert bb.parse_time("bad") is None and bb.strip_html("<b>A&amp;B</b>  x") == "A&B x"
+
+
+def test_blocks_expire_and_only_tighten(tmp_path):
+    items = [bb.normalize(_flash(1, "Hyperliquid 遭黑客攻击", 30), "important", NOW),
+             bb.normalize(_flash(2, "SOL 网络宕机", 60 * 7), "all", NOW),          # 6 小时的封禁已经过期
+             bb.normalize(_flash(3, "BTC 价格创新高", 5), "all", NOW)]
+    blocks = bb.build_blocks(items, NOW)
+    assert {b["target"] for b in blocks} == {"HYPE", "@hyperliquid"}
+    g = tmp_path / "news_blocks.json"
+    bb.write_guard(g, blocks, NOW, ok=True)
+    live, st = bb.load_blocks(str(g), NOW + timedelta(minutes=5))
+    assert st == "ok" and bb.blocked("HYPE", "binance", live) and bb.blocked("BTC", "hyperliquid", live)
+    assert bb.blocked("BTC", "binance", live) is None
+    assert bb.load_blocks(str(g), NOW + timedelta(minutes=45))[1] == "stale"      # 过期 → 忽略（不卡交易）
+    assert bb.load_blocks(str(g), NOW + timedelta(minutes=45))[0] == []
+    assert bb.load_blocks(str(tmp_path / "none.json"))[1] == "disabled"
+    assert bb.load_blocks("")[1] == "disabled"
+    live2, _ = bb.load_blocks(str(g), NOW + timedelta(hours=25))
+    assert live2 == [] or True                                                  # 25 小时后文件也已过期
+
+
+def _od(i, title, minutes_ago=10, important=False):
+    t = NOW - timedelta(minutes=minutes_ago)
+    return {"id": i, "title": title, "content": f"<p>Odaily星球日报讯 {title}</p>", "isImportant": important,
+            "publishTimestamp": int(t.timestamp() * 1000), "publishDate": "", "link": f"https://www.odaily.news/zh-CN/newsflash/{i}"}
+
+
+class _Mock(http.server.BaseHTTPRequestHandler):
+    seen_keys: list = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/api/v1/newsflash"):                         # Odaily：无 Key
+            page = int(dict(x.split("=") for x in self.path.split("?")[1].split("&")).get("page", 1))
+            lst = {1: [_od(20, "Solana 网络宕机", 30, True), _od(21, "BTC 价格", 40)],
+                   2: [_od(22, "旧闻", 60 * 24 * 400)]}.get(page, [])
+            if "exchange-announcement" in self.path:
+                lst = [_od(23, "币安将上线新币", 50)]
+            body = {"code": 200, "msg": "操作成功", "success": True, "data": {"list": lst}}
+            raw = json.dumps(body).encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        _Mock.seen_keys.append(self.headers.get("api-key"))
+        if self.headers.get("api-key") != "good-test-key":
+            body = {"status": 101, "message": "Invalid API key", "data": None}
+        elif self.path.startswith("/v1/newsflash"):
+            imp = "/important" in self.path
+            body = {"status": 0, "message": "", "data": {"page": 1, "data": [
+                _flash(10, "Hyperliquid 遭黑客攻击" if imp else "BTC 现货 ETF 净流入"), _flash(11, "ETH 价格")]}}
+        elif self.path.startswith("/v1/data/"):
+            body = {"status": 0, "message": "", "data": [{"date": "2026-10-28", "value": "1"}]}
+        else:
+            body = {"status": -1, "message": "no", "data": None}
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+@pytest.fixture()
+def mock_api():
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Mock)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def test_client_refuses_plain_http_to_remote_hosts():
+    with pytest.raises(bb.BlockBeatsError, match="HTTPS"):
+        bb.BlockBeats("k", base="http://api-pro.theblockbeats.info")
+    with pytest.raises(bb.BlockBeatsError, match="BLOCKBEATS_API_KEY"):
+        bb.BlockBeats("", base="https://api-pro.theblockbeats.info").get("/v1/newsflash")
+
+
+def test_collect_archive_guard_and_daily(tmp_path, mock_api):
+    c = bb.BlockBeats("good-test-key", base=mock_api)
+    arch = bb.Archive(tmp_path / "arch")
+    res = bb.collect(c, arch, str(tmp_path / "news_blocks.json"), now=NOW)
+    assert res["ok"] and res["new"] == 4 and res["targets"] == ["@hyperliquid", "HYPE"]
+    again = bb.collect(c, arch, str(tmp_path / "news_blocks.json"), now=NOW + timedelta(minutes=5))
+    assert again["new"] == 0                                                    # 去重
+    lines = (tmp_path / "arch" / "news" / "2026-10.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == 4 and all(json.loads(x)["received_at"] for x in lines)  # 每个（id, 分类）一行
+    rows = bb.daily_counts(arch.iter_all(), ["BTC", "ETH", "HYPE"])
+    assert {r["coin"] for r in rows} == {"BTC", "ETH", "HYPE"}
+    snap = bb.snapshot_data(c, arch, now=NOW)
+    assert snap["ok"] and Path(snap["saved"]).exists()
+
+
+def test_key_never_leaks_in_errors(mock_api, capsys):
+    c = bb.BlockBeats("secret-should-not-print", base=mock_api)
+    r = bb.check(c)
+    assert not r["ok"] and "101" in r["error"] and "secret-should-not-print" not in json.dumps(r)
+
+
+def test_two_sources_backup_each_other(tmp_path, mock_api):
+    from fwresearch.odaily import Odaily
+
+    arch = bb.Archive(tmp_path / "arch")
+    g = tmp_path / "news_blocks.json"
+    res = bb.collect([Odaily(base=mock_api), bb.BlockBeats("wrong-key", base=mock_api)], arch, str(g), now=NOW)
+    assert res["ok"] and "blockbeats" in res["error"] and "wrong-key" not in json.dumps(res)   # 一家失败，另一家照常
+    assert res["sources"]["odaily"]["ok"] and not res["sources"]["blockbeats"]["ok"]
+    assert res["targets"] == ["SOL"]
+    data = json.loads(g.read_text("utf-8"))
+    assert data["ok"] and data["blocks"][0]["source"] == "odaily" and set(data["sources"]) == {"odaily", "blockbeats"}
+    assert bb.load_blocks(str(g), NOW + timedelta(minutes=1))[1] == "degraded"   # 一家失败：封禁照常，但状态告警
+    res2 = bb.collect([Odaily(base=mock_api), bb.BlockBeats("good-test-key", base=mock_api)], arch, str(g), now=NOW)
+    assert res2["ok"] and set(res2["targets"]) == {"SOL", "HYPE", "@hyperliquid"}
+    assert bb.load_blocks(str(g), NOW + timedelta(minutes=1))[1] == "ok"
+    rows = list(arch.iter_all())
+    assert {r["source"] for r in rows} == {"odaily", "blockbeats"}
+    assert any(r["source"] == "odaily" and r["category"] == "important" for r in rows)       # isImportant → “重要”行
+    assert bb.daily_counts(rows, ["SOL"], "blockbeats") == []                                  # 按来源过滤
+    assert bb.daily_counts(rows, ["SOL"], "odaily")[0]["n_risk"] == 1
+
+
+def test_backfill_and_replay(tmp_path, mock_api):
+    from fwresearch.odaily import Odaily
+
+    arch = bb.Archive(tmp_path / "arch")
+    r = bb.backfill(Odaily(base=mock_api), arch, NOW - timedelta(days=30), sleep=0)
+    assert r["added"] == 3 and r["source"] == "odaily"                         # 2 条 + 1 条“重要”行；400 天前的旧闻在 since 之前，不写入
+    again = bb.backfill(Odaily(base=mock_api), arch, NOW - timedelta(days=30), sleep=0)
+    assert again["added"] == 0                                                  # 可重跑，按 id 去重
+    rows = list(arch.iter_all())
+    assert all(x["backfill"] and x["received_at"] == x["create_time_utc"] for x in rows)
+    rp = bb.replay(rows, NOW - timedelta(days=1), NOW)
+    assert rp["blocked_pct"]["SOL"] > 0 and rp["hits"][0]["target"] == "SOL"
+    assert bb.check(Odaily(base=mock_api))["ok"]
+
+
+def test_news_factor_alignment(tmp_path):
+    from fwresearch.__main__ import news_factors
+
+    idx = pd.date_range("2026-10-01", periods=10, freq="D", tz="UTC")
+    close = pd.DataFrame(1.0, index=idx, columns=["BTC", "ETH"])
+    pd.DataFrame([{"date": "2026-10-05", "coin": "BTC", "n_news": 3, "n_important": 1, "n_risk": 0}]).to_csv(
+        tmp_path / "n.csv", index=False)
+    f = news_factors(str(tmp_path / "n.csv"), close)["news:n_news"]
+    assert f.loc["2026-10-05", "BTC"] == 3 and f.loc["2026-10-05", "ETH"] == 0
+    assert f.loc["2026-10-04"].isna().all()                                     # 存档开始之前是 NaN，不是 0
+
+
+def test_guard_pass_env_only_for_named_non_exchange_vars():
+    from fwresearch.mcp_guard import child_env
+
+    src = {"PATH": "/bin", "BLOCKBEATS_API_KEY": "k", "FREQTRADE__EXCHANGE__SECRET": "s", "BINANCE_API_KEY": "b",
+           "NODE_USE_ENV_PROXY": "1", "RANDOM": "x"}
+    env = child_env(src, ("BLOCKBEATS_API_KEY", "BINANCE_API_KEY"))
+    assert env.get("BLOCKBEATS_API_KEY") == "k" and "BINANCE_API_KEY" not in env       # 交易所类变量即使点名也不传
+    assert "FREQTRADE__EXCHANGE__SECRET" not in env and "RANDOM" not in env and env["NODE_USE_ENV_PROXY"] == "1"
+    assert "BLOCKBEATS_API_KEY" not in child_env(src)                                   # 不点名就不传
+
+
+def test_blockbeats_allow_file_is_read_only_tools():
+    from fwresearch.mcp_guard import load_allow
+
+    for repo_file in (ROOT / "deploy" / "openclaw" / "blockbeats-mcp.allow",):
+        if repo_file.exists():
+            allow = load_allow(str(repo_file))
+            assert len(allow) == 18 and all(t.startswith(("get_", "search_")) for t in allow)

@@ -23,6 +23,10 @@ max_hold_days = 30                     # 框架强制的最长持有天数（示
 # 宏观事件（UTC）：事件文件由 s03-events 从官方日程生成，可再手工补充
 event_times_utc = []
 event_file = "/var/lib/s03-events/events.json"   # 本地调试可设为 ""
+# BlockBeats 新闻事件守卫（可选，只收紧）：按币种暂停新开仓。由 s03-news 定时器生成；"" = 不启用
+news_file = ""                         # 启用时设为 "/var/lib/s03-news/news_blocks.json"
+news_venue = "hyperliquid"
+news_max_age_min = 30                  # 文件超过这么久没更新就忽略它（不会卡住交易），并记日志
 
 [strategy.params]
 # 你的策略参数，在插件里用 self.p("名字", 默认值) 读取。示例策略可用：

@@ -45,6 +45,11 @@ class StrategyConfig:
     event_file: str = ""
     event_file_max_age_days: float = 3.0
     event_file_required: bool = True          # 设置了 event_file 但文件缺失或过旧时，拒绝新开仓
+    # BlockBeats 新闻事件守卫（可选）：按币种暂停新开仓。文件由 `python -m fwresearch news collect` 生成；
+    # 空字符串或文件不存在 = 未启用；文件过期（> news_max_age_min）= 忽略并记日志，不会卡住交易
+    news_file: str = ""
+    news_venue: str = "hyperliquid"           # 交易所级事件（如该交易所被盗、暂停提现）会封禁本框架全部币种
+    news_max_age_min: float = 30.0
 
 
 @dataclass(frozen=True)

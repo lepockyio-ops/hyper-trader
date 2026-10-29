@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# 安装官方 BlockBeats MCP（固定版本），并把它写死的 http:// 改成 https://（否则 API Key 明文传输）。
+# 用法（root）：s03-install-blockbeats-mcp [/opt/s03/bb-mcp]
+set -euo pipefail
+PREFIX="${1:-/opt/s03/bb-mcp}"
+VERSION="1.0.4"                 # 2026-10-29 审阅过源码：388 行，只有 GET 请求，无文件 / 进程操作；npm 包与 GitHub dist 一致
+SDK_VERSION="1.32.2"            # 依赖固定版本（上游写的是 ^1.0.0）
+mkdir -p "$PREFIX"
+npm install --prefix "$PREFIX" --ignore-scripts --no-audit --no-fund --save-exact \
+  "blockbeats-mcp@$VERSION" "@modelcontextprotocol/sdk@$SDK_VERSION"
+JS="$PREFIX/node_modules/blockbeats-mcp/dist/index.js"
+if grep -q '"http://api-pro.theblockbeats.info"' "$JS"; then
+  sed -i 's#"http://api-pro.theblockbeats.info"#"https://api-pro.theblockbeats.info"#' "$JS"
+fi
+# 校验：必须恰好一处 https 基地址，且不能再有任何 http:// 的接口地址
+[[ $(grep -c '"https://api-pro.theblockbeats.info"' "$JS") == 1 ]] || { echo "校验失败：没有找到 https 基地址（上游可能改了代码，请人工审阅）"; exit 1; }
+if grep -q 'http://api-pro' "$JS"; then echo "校验失败：仍有 http:// 地址"; exit 1; fi
+chown -R root:root "$PREFIX" 2>/dev/null || true
+chmod -R go-w "$PREFIX"
+echo "已安装 blockbeats-mcp $VERSION 到 $PREFIX（已改为 HTTPS）"

@@ -55,3 +55,8 @@ def test_lab_factors_defaults_to_research_data(tmp_path):
     r = _run("factors", "--coins", "BTC,ETH", "--ids", "q158_roc20,q158_kmid", "--out-dir", "lab", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["mode"] == "time_series"
+
+
+def test_lab_news_blocks_disabled_by_default(tmp_path):
+    r = _run("news", "blocks", "--guard-out", str(tmp_path / "none.json"), cwd=tmp_path)
+    assert r.returncode == 0 and json.loads(r.stdout)["status"] == "disabled"

@@ -141,11 +141,15 @@ class LiveLoop:
         acct = self.account_snapshot(ctxs)
         gb = self.guard.global_block(acct, now)
 
+        news_status = "disabled"
         for coin in self.s.strategy.coins:
             if coin in self.state.positions:
                 continue
-            self.step_coin(coin, ctxs[coin], dctx[coin], acct, blocked=block_new or not gb.ok,
-                           block_reasons=gb.reasons)
+            nb, news_status = self.guard.news_block(coin, now)       # 按币种：有重大事件时撤掉已挂的入场单
+            self.step_coin(coin, ctxs[coin], dctx[coin], acct, blocked=block_new or not gb.ok or not nb.ok,
+                           block_reasons=gb.reasons + nb.reasons)
+        if news_status in ("stale", "error", "degraded"):      # degraded = 两个新闻来源有一个失败（封禁照常）
+            self.journal.write("news_guard_degraded", status=news_status, file=self.s.strategy.news_file)
 
         if self.s.runtime.mode == "live":
             self.manage_schedule_cancel()
@@ -153,7 +157,7 @@ class LiveLoop:
         self.state.save(self.s.runtime.state_path)
         self.journal.write("cycle", equity=acct.equity, open_positions=list(self.state.positions),
                            arms={k: v.get("phase") for k, v in self.state.arms.items()},
-                           global_block=gb.reasons)
+                           global_block=gb.reasons, news_guard=news_status)
 
     # ================================================================ 数据
     def daily_contexts(self, ctxs) -> dict:
@@ -420,7 +424,7 @@ class LiveLoop:
             scale, ml_note = self.mlgate.decide(feats)
             rf *= min(1.0, scale)                     # 只能降低风险，不能放大
         plan = size_position(acct.equity, entry, intent.stop_px, c["maxLeverage"], s.risk, s.cost, risk_frac=rf)
-        v = self.guard.check_entry(coin, plan.notional, plan.risk_usd, acct)
+        v = self.guard.check_entry(coin, plan.notional, plan.risk_usd, acct, now=pd.Timestamp.now(tz="UTC"))
         mb2 = self.guard.market_block(mkt, plan.notional)
         card = {"coin": coin, "intent": intent.kind, "trigger": entry, "stop": intent.stop_px,
                 "size": plan.size, "notional": plan.notional, "risk_usd": plan.risk_usd,

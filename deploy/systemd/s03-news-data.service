@@ -1,0 +1,28 @@
+[Unit]
+Description=S03 BlockBeats 市场数据快照（ETF、稳定币、持仓量、美债、美元指数等；研究存档用）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=s03trader
+Group=s03trader
+WorkingDirectory=/opt/s03/hl-s03
+StateDirectory=s03-news
+StateDirectoryMode=0755
+EnvironmentFile=/etc/s03/blockbeats.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/s03/venv/bin/python -m fwresearch news data --archive /var/lib/s03-news/archive
+TimeoutStartSec=120
+ReadWritePaths=/var/lib/s03-news
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0022

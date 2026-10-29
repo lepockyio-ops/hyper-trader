@@ -1,4 +1,4 @@
-# 研究前端：找想法、筛因子、统计检验（v2.2）
+# 研究前端：找想法、筛因子、统计检验（v2.5）
 
 本框架的研究前端由 `fwresearch/` 提供，hyper-trader 与 freq-trader 两个模板共用同一份代码。
 它借用了 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项强项，但**交易逻辑、回测口径和上线门槛仍然由本框架负责**：
@@ -148,6 +148,139 @@ python3 scripts/run.py lab vt-check --vt-bin /opt/s03/vt-venv/bin
 
 它依次检查版本、因子库桥接、MCP 握手、白名单、拒绝交易工具、密钥过滤，全部通过时 `ok: true`。
 
+## BlockBeats（律动）新闻：接入判断与接法（v2.3，2026-10-29）
+
+> v2.4 更正：BlockBeats 历史可以回填到 2020-01，事件规则已重写，并加入 Odaily 作为第二来源，见下一节“新闻来源：BlockBeats 与 Odaily”。
+
+**结论：有限接入。** 只做两件事：
+
+1. 重大事件守卫：按币种暂停新开仓，只收紧不放宽。
+2. 新闻和市场数据存档：几个月后作为候选因子去检验。
+
+**不做**：用新闻情绪调整仓位、杠杆、止损或入场。没有历史数据能证明它有用；新闻发出时价格多半已反应（模型推断）。
+
+### 优劣势
+
+| | 内容 | 证据 |
+|---|---|---|
+| 优势 | 被盗、下架、执法、暂停提现、脱锚、宕机、大额解锁这类事件发生时，避免在可能跳空的时候开新仓 | 模型推断；现在没有历史可回测 |
+| 优势 | 免费、整理好的全市场数据（ETF 资金流、稳定币市值、持仓量、美债、美元指数等），可做候选因子 | 已核验接口存在；有没有用待检验 |
+| 优势 | 研究 agent 找想法时能读到中文加密圈最快的快讯 | — |
+| 劣势 | 没有情绪字段和币种标签，只能用可复现的关键词规则判断（规则与时长都是示例值） | 已核验官方文档 |
+| 劣势 | ~~历史能取多深未知~~（v2.4 实测：可回填到 2020-01）；时间口径为北京时间字符串 | 已核验 |
+| 劣势 | 调用限额与使用条款未公开 | 未知 |
+| 劣势 | 新闻正文是外部文本，可能夹带针对 AI 的指令 | 只交给沙箱里的研究 agent，或先转成结构化字段 |
+
+### 两个官方库的审阅结果
+
+| 库 | 结论 | 原因（已核验事实） |
+|---|---|---|
+| [blockbeats-MCP](https://github.com/BlockBeatsOfficial/blockbeats-MCP) 1.0.4，MIT | **采用，但要修一处**，只给 `s03-research` | 源码 388 行，只有 GET 请求，没有文件或进程操作；npm 包与 GitHub 上的 dist 一致。**但 `BASE_URL` 写的是 `http://`**，服务器在 HTTP 上直接返回 200、不跳转，API Key 会明文传输。`s03-install-blockbeats-mcp` 安装时固定版本，改为 `https://` 并校验；`s03-bb-mcp` 启动前再检查一次 |
+| [blockbeats-skill](https://github.com/BlockBeatsOfficial/blockbeats-skill) 1.0.3 | **不采用**，只当接口参考 | 让 agent 自己执行 `curl`，等于给 agent 一条往外发数据的通道；还内置了未经验证的买卖规则，例如“情绪指标 < 20 → 潜在买入”“ETF 单日净流入 > 5 亿美元 → 强烈买入信号”，不符合“未经检验不进策略” |
+| [RESTful-API](https://github.com/BlockBeatsOfficial/RESTful-API) | 不采用 | 只有一份 README，描述 2023 年的旧免 Key 接口；验证机连接被重置 |
+
+框架自己的采集器（`fwresearch/blockbeats.py`）直接调用官方 Pro API，只用 HTTPS，Key 不进日志和输出。
+
+### 接法
+
+| 部分 | 文件 / 命令 | 行为 |
+|---|---|---|
+| 采集与存档 | `s03-news.timer`（每 5 分钟）→ `python -m fwresearch news collect` | 拉取“全部”和“重要”快讯；按（id, 分类）只追加存档，记录收到时间；生成 `news_blocks.json` |
+| 事件规则 | `fwresearch/blockbeats.py` 的 `COINS`、`VENUES`、`CATEGORIES`、`EXCLUDE` | 同一段文字同时出现“币种或交易所”和“风险类别”才命中。封禁时长：被盗 24 小时、下架 72 小时、执法 12 小时、暂停提现 12 小时、脱锚 6 小时、宕机 6 小时、大额解锁 6 小时（均为示例值）。交易所级事件封禁该交易所上的全部币种 |
+| 交易程序读取 | `s03/risk/guard.py` 的 `news_block()`：`[strategy] news_file` 指向守卫文件后，在下单前检查，并撤掉该币已挂的入场单 | 只在守卫状态为 `ok` 时封禁；文件超过 30 分钟未更新就忽略并记日志，不会卡住交易；回测不应用（没有历史） |
+| 市场数据快照 | `s03-news-data.timer`（每天 00:40 UTC）→ `news data` | 存 ETF、稳定币、持仓量、美债、美元指数、Bitfinex 多头、顶底指标等原始返回 |
+| 研究 agent | MCP 服务器 `blockbeats`（默认关闭）经 `mcp-guard` 放行 18 个只读工具 | 只给 `s03-research`，其他 agent 一律拒绝 |
+| 以后的检验 | `news daily --out research/news_daily.csv`，再 `factors --tf 1d --news-csv research/news_daily.csv` | 存档满 60 天以上才有意义；按币新闻量、重要新闻量、风险命中数作为候选因子，过了 FDR 才写进策略 |
+
+### 安装验证记录（2026-10-29）
+
+| 项目 | 结果 |
+|---|---|
+| 官方 MCP 安装与修补 | `blockbeats-mcp@1.0.4` + `@modelcontextprotocol/sdk@1.32.2` 固定版本安装；`http://` 改为 `https://`，校验通过 |
+| 经 mcp-guard 握手 | 18 个工具全部放行；`write_file`、`trading_place_order` 等被拒绝 |
+| 走 HTTPS 访问真实接口 | 用无效测试 Key 调用，服务器返回 `Invalid API key`，说明请求经 HTTPS 到达官方服务器 |
+| 框架采集器 | `news check` 用无效 Key 返回 `status 101`，输出里没有 Key；不设 Key 时给出申请指引 |
+| OpenClaw 2026.10.8 | `config patch --dry-run` 通过；`mcp probe blockbeats` 显示 18 个工具；`mcp doctor` 正常；没有沙箱过滤告警 |
+| 代理环境 | Node 自带的 fetch 默认不走 `HTTPS_PROXY`，要设置 `NODE_USE_ENV_PROXY=1`（mcp-guard 已放行这个变量） |
+| 真实 Key（v2.4 补测） | `news check` ok；10 个数据接口全部可用；时间为北京时间字符串；未见限频响应头 |
+
+## 新闻来源：BlockBeats 与 Odaily，同时接入（v2.4，2026-10-29）
+
+用真实 BlockBeats Key 和 Odaily 公开接口实测后的结论：**两家同时接入，但各有分工**；接入前先修好了事件规则（v2.3 的规则误报严重，见下）。
+
+### 实测对比（已核验事实，2026-10-29）
+
+| 项目 | BlockBeats Pro API | Odaily 公开接口 |
+|---|---|---|
+| 认证 / 费用 | 需付费 Key | 不需要 Key |
+| 快讯历史 | 约 16.8 万条，可翻页回到 2020-01（每页最多 50 条） | 约 38 万条，可翻页回到 2018-05（每页最多 100 条） |
+| 最近一周数量 | 1,099 条（“重要”636） | 1,106 条（“重要”519） |
+| 早期密度 | 2023–2024 年约为 Odaily 的一半 | 更全 |
+| 时间字段 | `create_time` 为北京时间字符串（与框架的解析一致） | `publishTimestamp` 毫秒 UTC |
+| 分类 | 重要、原创、首发、链上、融资、预测市场、AI | 交易所公告、链上数据、宏观政策、项目动向等 12 类 |
+| 结构化数据 | 有：ETF 资金流、稳定币市值、合约持仓（含 Hyperliquid）、Bitfinex 多头、美债、美元指数等 10 个接口全部可用 | 没有 |
+| 文档与实际不符 | `size` 超过 50 也只返回 50 | `isImportant=true` 过滤不生效（每条自带该字段，可用） |
+| 限频 / 条款 | 无限频响应头；条款未查 | 无限频响应头；使用条款未知 |
+
+**速度与覆盖**：同一周按标题相似度匹配到的同一条新闻，发布时间中位差约 30 秒（Odaily 略早，四分位 −5 分钟到 +1.5 分钟），可以视为一样快。事件层面高度重合；但在 6 个历史事件复核里，有 2 个只被其中一家用可识别的标题报道（币安认罪和解只在 Odaily 命中，Hyperliquid 订单系统故障只在 BlockBeats 命中）。所以第二个来源主要带来**冗余**（一家断了守卫照常）和少量**召回**。
+
+### v2.3 事件规则的问题与修正
+
+用两家最近一周的快讯回放 v2.3 规则，封禁时间占比：ETH 88%、BTC 56%、SOL 29–49%、`@binance` 21–25%，几乎全是误报。原因是规则看整段正文：第三方协议被盗时“损失 8.5 枚 BTC”、交易对的计价币（AAVE/BTC）、“星球午讯”汇总帖、“成功阻止攻击”“没有发生黑客攻击”这类否定句都被当成事件。
+
+v2.4 规则（`fwresearch/blockbeats.py` 的 `classify`，v2.5 已改为只看正文，见下文）：
+
+- 只看标题；
+- 被盗 / 宕机按币种封禁时，币种必须是主语（“以太坊主网…”“Solana 网络…”“Solana：…”官方声明）；
+- 下架 / 解锁 / 脱锚要求币种紧挨风险词，交易对、杠杆对下架不算；
+- 交易所级事件要求交易所名和风险词都在标题里；交易所暂停个别代币充提不封整个交易所；Hyperliquid 平台事件同时封 HYPE；
+- 排除汇总帖、已恢复 / 否认 / 未受影响 / 判决 / 例行维护类标题。
+
+修正后：同一周两家的封禁时间占比都是 0（这一周没有涉及这 5 个币及 3 个交易所的真实事件）；6 个历史事件里命中了 Solana 主网停摆（2024-02-06）、Hyperliquid 朝鲜黑客地址交易（2024-12-23）、币安认罪和解（2023-11-21）、Hyperliquid 订单系统故障（2025-07-29），未误封 JELLY 下架当天的 HYPE（只剩 1 条边缘标题命中）。**这套规则是在 1 周快讯和 6 个事件上人工调的，有过拟合风险**（模型推断）；上线前用 `news backfill` + `news replay` 在别的年份复核误报和漏报。
+
+### v2.5（2026-10-29）：两家同时作为必需来源；事件规则改为只看正文
+
+按你的决定做了两处改动：
+
+1. **两家都是必需来源。** 采集默认 `odaily,blockbeats`，`/etc/s03/blockbeats.env` 不再可选。某一家这一轮失败时，守卫状态为 `degraded`：剩下那家的封禁照常生效，交易程序记日志告警（HL 写 `news_guard_degraded`，FT 打 warning，`s03ft status` 显示各来源状态）。
+2. **规则只看正文，不看标题。** 去掉媒体开头（“BlockBeats 消息，10 月 29 日，”“Odaily星球日报讯”）后逐句判断，同一句里要同时有币种或交易所和风险词：
+   - 汇总帖（正文是“1. … 2. …”编号列表）整条跳过；整条里有“已恢复 / 否认 / 没有发生 / 未受影响 …”整条跳过；
+   - 背景回顾句（“此前…”“去年…”）、假设和提醒句（“若…”“建议…”“谨防…”）、“黑客松”不算；
+   - 币种被盗 / 宕机要求币种是主语（币种后 12 个字内跟“主网 / 网络 / 验证者…”）；“在 BNB Chain 上铸造”、个人私钥被盗不算；
+   - 交易所被盗类：资金“存入 / 转入 / 还款”交易所、“在 Hyperliquid 上交易 / 做多”不算；“比特币安全”“代币安全港”里的“币安”不算；
+   - 整条提到升级维护时，不判暂停提现。
+
+**同样的数据上对比（已核验事实；规则与时长仍是示例值）：**
+
+| 数据 | v2.4 只看标题 | v2.5 只看正文 |
+|---|---|---|
+| 最近一周（两家合并） | 封禁占比都是 0 | HYPE 4%（HyperLabs 申请赎回 18 万枚 HYPE），其余 0 |
+| 6 个历史事件（调规则用的样本） | Solana 停摆只有 Odaily 识别；币安和解只有 Odaily；订单系统故障只有 BlockBeats | Solana 停摆两家都识别；币安和解两家都识别（共 25 条）；另识别出 2023-05 以太坊信标链出块故障；订单系统故障仍只有 BlockBeats |
+| 2026-04 至 10 月 Odaily 回放（**调规则时没看过的数据**，3.3 万条） | 22 次命中，单个目标封禁占比最高 2.4% | 48 次命中（38 条快讯），最高 3.6%（`@binance`、ETH） |
+
+**结论（模型推断）：** 只看正文召回更好（同一事件两家都能识别，冗余更有意义），代价是误报约翻倍。在没调过规则的 7 个月里，两种规则的命中**大多数都是误报**（第三方协议被盗、诉讼评论、行业报告等），真实相关事件只有少数几条（例如 2026-10-09 美国司法部审查币安合规、HYPE 大额解除质押）。因为封禁总时长占比不到 4%，代价有限；但上线前仍应在更长的历史上回放，再决定要不要继续收紧，或改成“标题和正文同时命中才封”。
+
+### 分工
+
+| 用途 | 来源 | 原因 |
+|---|---|---|
+| 实盘事件守卫 | 两家合并，两家都是必需来源（任一家命中就封；同一事件不叠加时长；一家失败时状态 degraded） | 一家故障时另一家顶上；互补召回 |
+| 新闻因子 / 事件研究 | **只用一家**，建议 Odaily（`news daily --source odaily`） | 历史最长、早期更全；两家合并会重复计数 |
+| 市场数据因子 | BlockBeats（`news data` 每日快照） | 只有它有 ETF 资金流、稳定币、持仓量等 |
+| 研究 agent 读新闻 | BlockBeats MCP（经 mcp-guard，18 个只读工具） | Odaily 不需要 MCP，研究 agent 用框架命令即可 |
+
+**回填数据的偏差**（写进任何结论里）：回填的是现在还在网站上的快讯，删掉的不会出现，正文可能被改过，“重要”标记可能是事后补的；回填行的“收到时间”用的是发布时间。BlockBeats 里 `bottom_top_indicator` 自带“小于 20 潜在买入、大于 80 潜在卖出”的说明，是来源方观点，未经检验，不进策略。
+
+### 命令
+
+| 命令 | 作用 |
+|---|---|
+| `python -m fwresearch news check` | 两个来源的连通性自检（都应 ok: true） |
+| `python -m fwresearch news collect` | 一轮采集（定时器每 5 分钟跑一次）；`--sources odaily,blockbeats` 可指定来源 |
+| `python -m fwresearch news backfill --sources odaily --since 2020-01-01` | 回填历史到 `research/news/news/backfill-odaily.jsonl`；默认每页间隔 1 秒，可中断续跑 |
+| `python -m fwresearch news replay --source odaily --since 2024-01-01 --verbose` | 用当前规则回放：每个币 / 交易所被封的时间占比和命中标题 |
+| `python -m fwresearch news daily --source odaily` | 按币每日新闻计数，给 `factors --news-csv` |
+
 ## 命令一览
 
 | 命令 | 作用 |
@@ -157,5 +290,6 @@ python3 scripts/run.py lab vt-check --vt-bin /opt/s03/vt-venv/bin
 | `python3 scripts/run.py lab matrix [--base base] [--stress cost2x]` | 研究矩阵的多方案检验 |
 | `python3 scripts/run.py lab idea add|list|show|move|attach|trials` | 想法登记簿（`research/ideas.jsonl`，只追加，建议提交到仓库） |
 | `python3 scripts/run.py lab vt-check [--vt-bin DIR]` | Vibe-Trading 安装自检 |
+| `python3 scripts/run.py lab news check|blocks|daily|backfill|replay` | 新闻（Odaily + BlockBeats）：自检、当前守卫、每日汇总；另有 `collect`、`backfill`、`replay`（见上一节） |
 
 来源与许可见 `fwresearch/NOTICE.md`。

@@ -19,6 +19,7 @@
         lab matrix                                  # 研究矩阵：Bootstrap、符号翻转、滚动分段、DSR、PBO、成本压力
         lab idea add|list|show|move|attach|trials
         lab vt-check [--vt-bin /opt/s03/vt-venv/bin]   # Vibe-Trading 安装自检
+        lab news check|blocks|daily|backfill|replay        # 新闻（Odaily + BlockBeats）事件守卫与存档
 """
 from __future__ import annotations
 

@@ -18,6 +18,17 @@
   // MCP 服务器在 Gateway 主机上运行（不在研究沙箱里）。没有安装 /opt/s03/vt-venv 时保持 enabled: false。
   mcp: {
     servers: {
+      // BlockBeats（律动）官方 MCP（v2.3）：新闻快讯、文章、搜索、ETF / 稳定币 / 持仓量 / 宏观数据，只给 s03-research 找想法用。
+      // 安装：s03-install-blockbeats-mcp（固定 1.0.4，并把上游写死的 http:// 改为 https://）；Key 在 /etc/s03/blockbeats.env。
+      // 18 个工具全部是只读 GET；mcp-guard 再按 deploy/openclaw/blockbeats-mcp.allow 放行。新闻正文是外部内容，只进沙箱里的研究 agent。
+      "blockbeats": {
+        enabled: false,                                     // 装好并填好 Key 后改为 true
+        command: "/usr/local/lib/s03/s03-bb-mcp",
+        args: [],
+        cwd: "/srv/s03-research",
+        codex: { agents: ["s03-research"] },
+        toolFilter: { include: ["get_*", "search_news"] },
+      },
       "vibe-trading": {
         enabled: false,                                     // 装好 Vibe-Trading 后改为 true（install.sh --with-vibe-trading）
         command: "/usr/local/lib/s03/s03-vt-mcp",           // 包装脚本：读 /etc/s03/vibe-trading.env，经 mcp-guard 启动
@@ -55,7 +66,7 @@
         sandbox: { mode: "off" },                      // 需要在主机上调用 sudo systemctl；能力由 sudoers 白名单限定
         tools: {
           allow: ["exec", "read", "message"],
-          deny: ["vibe-trading__*", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+          deny: ["vibe-trading__*", "blockbeats__*", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
         },
       },
 
@@ -66,7 +77,7 @@
         sandbox: { mode: "off" },                      // 需要调用主机上的 /usr/local/bin/s03-gate
         tools: {
           allow: ["exec", "message"],
-          deny: ["vibe-trading__*", "read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+          deny: ["vibe-trading__*", "blockbeats__*", "read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
         },
       },
 
@@ -76,9 +87,9 @@
         workspace: "/srv/s03-research",
         sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },  // 沙箱镜像需装好 Python 依赖（核对）
         tools: {
-          allow: ["vibe-trading__*", "read", "write", "edit", "exec", "sessions_spawn"],   // MCP 工具的规范名是 <服务器>__<工具>（已核对）
+          allow: ["vibe-trading__*", "blockbeats__*", "read", "write", "edit", "exec", "sessions_spawn"],   // MCP 工具的规范名是 <服务器>__<工具>（已核对）
           // 研究 agent 跑在沙箱里：沙箱还有一道工具闸门，不放行的话 MCP 工具会在发给模型前被过滤（doctor 实测告警）
-          sandbox: { tools: { alsoAllow: ["vibe-trading__*"] } },
+          sandbox: { tools: { alsoAllow: ["vibe-trading__*", "blockbeats__*"] } },
           deny: ["process", "browser", "gateway", "message"],
         },
         subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-research"] },   // allowAgents 的取值格式（核对）
@@ -91,7 +102,7 @@
         sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },
         tools: {
           allow: ["read", "write", "sessions_spawn", "message"],
-          deny: ["vibe-trading__*", "exec", "process", "edit", "apply_patch", "browser", "gateway"],
+          deny: ["vibe-trading__*", "blockbeats__*", "exec", "process", "edit", "apply_patch", "browser", "gateway"],
         },
         subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-review"] },
       },

@@ -9,7 +9,8 @@
   python -m fwresearch idea ...        想法登记簿：假设 → 筛因子 → 回测 → 统计检验 → 人工批准写进策略规格
   python -m fwresearch mcp-guard ...   Vibe-Trading MCP 的白名单代理（只放行研究类工具）
   python -m fwresearch vt-check        Vibe-Trading 安装自检（版本、因子库桥接、MCP 握手、放行与拒绝、密钥过滤）
+  python -m fwresearch news ...        新闻（Odaily + BlockBeats）：采集存档、事件守卫、历史回填、守卫回放、每日汇总、自检
 
 部分代码移植自 Vibe-Trading（MIT），见 NOTICE.md。
 """
-__version__ = "1.1.0"
+__version__ = "1.3.0"

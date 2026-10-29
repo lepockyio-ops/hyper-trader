@@ -1,4 +1,4 @@
-# hyper-trader：Hyperliquid 永续自动交易框架（模板版 v2.2 · 策略留空）
+# hyper-trader：Hyperliquid 永续自动交易框架（模板版 v2.5 · 策略留空）
 
 这是一个**不含交易策略的框架**，交易规则由你写成插件接入。框架已经提供：
 
@@ -88,11 +88,12 @@ python3 scripts/backtest.py --coin SOL --okx-pages 60
 
 | 文件 | 改什么 | 谁来改 | 默认 |
 |---|---|---|---|
-| `config/settings.toml`（由 `settings.example.toml` 复制） | `[strategy] plugin`（你的策略）、`coins`（标的）、`[strategy.params]`（策略参数）、风险数字 | 你 | 空白模板；BTC、ETH、SOL、BNB、HYPE；`network="testnet"`、`mode="shadow"` |
+| `config/settings.toml`（由 `settings.example.toml` 复制） | `[strategy] plugin`（你的策略）、`coins`（标的）、`[strategy.params]`（策略参数）、风险数字、`news_file`（新闻事件守卫，可选） | 你 | 空白模板；BTC、ETH、SOL、BNB、HYPE；`network="testnet"`、`mode="shadow"` |
 | 环境变量 `HL_ACCOUNT_ADDRESS`、`HL_API_WALLET_KEY` | 账户地址、API 钱包私钥（服务器上放在 `/etc/s03/hl-trader.env`） | 你 | 无 |
 | 环境变量 `HL_ALLOW_MAINNET` | 主网解锁口令（见 `s03/config.py`），对应 G9 | 只能是你 | 未设置 = 主网锁定 |
 | `deploy/openclaw/openclaw.s03.json5` | 合并进 OpenClaw 配置：hooks token、模型 id；装了 Vibe-Trading 时把 `mcp.servers["vibe-trading"].enabled` 改为 `true` | 你 | Vibe-Trading 关闭 |
 | `deploy/openclaw/exec-approvals.s03.json` | 4 个 agent 的命令白名单（`openclaw approvals set --file …` 导入） | 你（通常不用改） | — |
+| `/etc/s03/blockbeats.env` | BlockBeats API Key（只放这一个）；新闻守卫（与 Odaily 同时必需）和研究 MCP 共用 | 你 | 启用新闻守卫时必填 |
 | `/etc/s03/vibe-trading.env` | 只放大模型配置，绝不放交易所密钥 | 你 | 不填也能用因子库和行情工具 |
 
 **增减标的**：只改 `settings.toml` 的 `coins`。新币要在 `scripts/backtest.py` 和 `scripts/research_matrix.py` 的 `PLATFORM_MAX` 里补上平台最大杠杆（以 Hyperliquid `meta` 为准）。
@@ -167,6 +168,22 @@ VT_PYTHON=/opt/s03/vt-venv/bin/python python3 scripts/run.py lab factors --zoo a
 
 Vibe-Trading 只用于找想法和粗筛。它的回测按“下一根开盘调仓”成交、不模拟止损单；它的加密行情是 OKX 现货、按 UTC+8 切日。所以上线证据一律以本框架的回测为准。
 
+### 新闻事件守卫：Odaily + BlockBeats（v2.5）
+
+只用来做两件事。一是**重大事件守卫**：按币种或交易所暂停新开仓，只收紧不放宽；守卫文件 30 分钟不更新就失效，不会卡住交易。二是**存档与历史回填**：作为候选因子去检验。不用新闻情绪调整仓位、杠杆或进出场。
+
+两个来源同时接入，都是必需来源：Odaily 免费，历史可回填到 2018 年；BlockBeats 付费会员，另有 ETF 资金流、稳定币、持仓量等数据。一家某轮失败时守卫状态为 `degraded`，另一家的封禁照常生效并告警。v2.5 起事件规则**只看正文、不看标题**（逐句判断）；在调规则时没看过的 7 个月数据上，封禁时间占比最高 3.6%，但命中里误报占多数。实测对比、规则说明和偏差见 `docs/RESEARCH_LAB.md` 的“新闻来源：BlockBeats 与 Odaily”。
+
+**上线前先回放**：用 `news backfill` 补历史，再用 `news replay` 看规则在过去会封多久、封的是不是真事件。规则与封禁时长都是示例值。
+
+```bash
+# 详细步骤见 deploy/README.md 的“可选：新闻事件守卫”一节
+python3 scripts/run.py lab news check          # 需要环境变量 BLOCKBEATS_API_KEY；两个来源都应 ok: true
+python3 scripts/run.py lab news backfill --sources odaily --since 2024-01-01   # 回填历史（约 1 小时，可中断续跑）
+python3 scripts/run.py lab news replay --source odaily --since 2024-01-01 --verbose
+python3 scripts/run.py lab news blocks --guard-out /var/lib/s03-news/news_blocks.json   # 看当前哪些币被暂停
+```
+
 ## 8. 部署到服务器、交给 OpenClaw 运营
 
 按 [`deploy/README.md`](deploy/README.md) 逐条执行。它会建立：
@@ -202,6 +219,8 @@ Vibe-Trading 只用于找想法和粗筛。它的回测按“下一根开盘调�
 | 因子显示 `insufficient` | IC 观测太少（截面 < 60、时间序列 < 12 个月）。资金费因子常见：OKX 只能下载约 3 个月资金费率 |
 | 所有因子都是 dead | 不到两年的数据、5 个高度相关的币，本来就很难有显著结论。不要为了出结果去调阈值 |
 | 回测报告写“证据不足” | 交易少于 30 笔（G1）。延长回测区间或增加标的，不要降低门槛 |
+| 某个币突然不再开新仓，日志里有 `news_block` | 新闻事件守卫（Odaily / BlockBeats）命中了这个币或交易所的重大事件（时长见 `docs/RESEARCH_LAB.md`）。用 `lab news blocks` 查看原因和到期时间；不要为了恢复交易去改规则 |
+| 守卫状态是 `stale` | 采集定时器 30 分钟没有更新（Key 失效、限额或网络）。交易程序已自动忽略守卫，修好采集后自动恢复 |
 | `openclaw` 提示 Node 版本不支持 | 2026.10.8 需要 Node ≥ 24.22.1 或 ≥ 26.12.1 |
 | `openclaw doctor` 提示沙箱会过滤 MCP 工具 | 用仓库里最新的 `openclaw.s03.json5`：研究 agent 已加 `tools.sandbox.tools.alsoAllow: ["vibe-trading__*"]` |
 | `vt-check` 的 `mcp_tools.missing_from_upstream` 不为空 | Vibe-Trading 升级后改了工具名；回到 0.1.18，或同步更新 `fwresearch/mcp_guard.py` 的白名单并重跑测试 |

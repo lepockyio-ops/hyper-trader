@@ -147,9 +147,28 @@ class RiskGuard:
                     group_risk += p["risk_usd"] / acct.equity
         return max(0.0, min(rf, self.risk.corr_group_risk_cap - group_risk))
 
-    def check_entry(self, coin: str, notional: float, risk_usd: float, acct: AccountSnapshot) -> Verdict:
+    # ---------------------------------------------------------- 新闻事件守卫（按币种，只收紧）
+    def news_block(self, coin: str, now: pd.Timestamp | None = None) -> tuple[Verdict, str]:
+        """新闻事件守卫（Odaily + BlockBeats）：该币或本交易所有重大事件时禁止新开仓。返回 (结论, 守卫状态)。
+        状态 disabled / ok / degraded / stale / error；ok 与 degraded（一个来源失败）时封禁，过期或损坏时忽略（由日志告警）。"""
+        from fwresearch.blockbeats import blocked, load_blocks
+
+        v = Verdict(True)
+        st = self.strat
+        ts = (now or pd.Timestamp.now(tz="UTC")).to_pydatetime()
+        blocks, status = load_blocks(st.news_file or None, ts, st.news_max_age_min)
+        b = blocked(coin, st.news_venue, blocks)
+        if b:
+            v.fail(f"news_block:{b['category']}:{b['target']}")
+        return v, status
+
+    def check_entry(self, coin: str, notional: float, risk_usd: float, acct: AccountSnapshot,
+                    now: pd.Timestamp | None = None) -> Verdict:
         v = Verdict(True)
         r = self.risk
+        nb, _ = self.news_block(coin, now)
+        for reason in nb.reasons:
+            v.fail(reason)
         if coin in acct.open_positions:
             v.fail("already_in_position")
         if len(acct.open_positions) >= r.max_positions:
