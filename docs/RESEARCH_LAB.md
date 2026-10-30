@@ -1,4 +1,4 @@
-# 研究前端：找想法、筛因子、统计检验（v2.6）
+# 研究前端：找想法、筛因子、统计检验（v2.7）
 
 本框架的研究前端由 `fwresearch/` 提供，hyper-trader 与 freq-trader 两个模板共用同一份代码。
 它借用了 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项强项，但**交易逻辑、回测口径和上线门槛仍然由本框架负责**：
@@ -280,6 +280,37 @@ v2.4 规则（`fwresearch/blockbeats.py` 的 `classify`，v2.5 已改为只看�
 | `python -m fwresearch news backfill --sources odaily --since 2020-01-01` | 回填历史到 `research/news/news/backfill-odaily.jsonl`；默认每页间隔 1 秒，可中断续跑 |
 | `python -m fwresearch news replay --source odaily --since 2024-01-01 --verbose` | 用当前规则回放：每个币 / 交易所被封的时间占比和命中标题 |
 | `python -m fwresearch news daily --source odaily` | 按币每日新闻计数，给 `factors --news-csv` |
+
+## 上线判定与研究流程（v2.7，来自 v2.6 的外部审查）
+
+**上线判定只有一个入口**（freq-trader：`s03ft research verdict --idea <id>`；hyper-trader：`python3 scripts/research_matrix.py verdict --idea <id>`），
+只用组合回测的逐笔记录，并要求：
+
+1. **样本外段事先登记**：`lab idea holdout --id <id> --start <日期>`，只能在想法进入 backtesting 之前登记一次，之后不能改。
+   判定读登记值；命令行 `--holdout-start` 只作参考（判“证据不足”）。
+2. **样本外按入场时间归属**：切分日之后入场的交易才算样本外；之前入场、之后平仓的跨边界持仓两边都不算，单独报告笔数；
+   样本外段至少占全部时间跨度的 20%（示例值；G2 写的是最后 30%）。
+3. **必需压力方案随策略声明**：freq-trader 的策略类属性 `research_stress`（默认 `cost2x`、`delay1`、`stopslip`，`research_stop_slip` 默认 0.2%）；
+   hyper-trader 的插件属性 `research_stress`（默认 `cost2x`、`funding2x`）。`plan` 与 `portfolio --all` 把它写进清单。
+   每个方案四种状态：没有运行、运行失败 → 证据不足；基准有交易而压力方案零交易 → 不通过；否则期望 R > 0 为通过（示例门槛）。
+   改动 `research_stress` 要写进策略规格，并在回测之前定好。
+4. **研究数据缺口**（没有历史事件文件、资金费或日线没覆盖回测区间、某个币数据不足）存在时，最多判“证据不足”。
+5. 符号翻转检验只报告、不参与判定（零假设下 R 关于 0 对称的前提，在止损截断、盈利长尾时不成立）。
+6. `lab matrix`（单币 × 单年）只出“诊断”，不再给上线判定。
+
+**结果可复核**：组合回测每次运行一个独立目录 `research/results/portfolio/<方案>/run-<时间>/`，`latest.json` 原子替换，
+运行失败也会成为 latest（状态 error），旧的成功结果不会再被读到；判定时核对状态、版本指纹和逐笔文件的 sha256。
+版本指纹包含：代码、解析后的最终配置（freq-trader 用 `freqtrade show-config`，含附加配置与 `FREQTRADE__…` 环境变量，密钥显示为 REDACTED；
+hyper-trader 用解析后的策略 / 成本 / 风控设置）、依赖版本、历史事件文件、数据文件的**内容**校验和。
+`verify` 要求两次都成功且都有哈希；订单哈希包含 freqtrade 导出的全部订单字段（回测导出本身不含挂单状态）。
+
+**回放的事件窗口（hyper-trader）**：回放现在读取历史事件文件，事件前后不新开仓、撤掉已挂入场单，与实盘一致。
+
+**止损滑点压力 `stopslip`（freq-trader）**：对止损离场的交易，事后再扣“额外滑点 × 入场名义价值”，按初始风险折成 R。
+这是近似：不改变触发时点，部分止盈后的剩余仓位按全部名义价值扣（偏保守）。
+
+**仍未解决（结论里要写明）**：真正的滚动“训练 → 冻结 → 测试”未自动化；尝试次数仍靠登记；资金费翻倍（freq-trader）、
+跳空与排队未实现；hyper-trader 的组合回测是交易层近似；回测不应用新闻守卫。
 
 ## 研究流程的修正（v2.6，来自外部审查）
 

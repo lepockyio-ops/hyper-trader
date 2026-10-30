@@ -45,6 +45,8 @@ class Idea:
     evidence: list = field(default_factory=list)
     history: list = field(default_factory=list)
     n_backtests: int = 0
+    holdout_start: str | None = None          # 样本外段起点（UTC 日期），只能在进入 backtesting 之前登记一次
+    holdout_registered_at: str | None = None
 
 
 class IdeaBook:
@@ -76,6 +78,8 @@ class IdeaBook:
                         it.n_backtests += 1
                 elif k == "evidence":
                     it.evidence.append(ev["evidence"])
+                elif k == "holdout":
+                    it.holdout_start, it.holdout_registered_at = ev["start"], ev["at"]
                 it.history.append({k2: ev[k2] for k2 in ev if k2 not in ("idea",)})
         return ideas
 
@@ -119,6 +123,20 @@ class IdeaBook:
                 raise ValueError("approved 只能由人批准：需要 --by human --approver <姓名>（agent 不得执行此操作）")
         self._append({"kind": "status", "id": iid, "at": pd.Timestamp.now(tz="UTC").isoformat(), "from": it.status,
                       "to": to, "reason": reason.strip(), "by": by, "approver": approver})
+        return self.get(iid)
+
+    def set_holdout(self, iid: str, start: str, by: str = "agent") -> Idea:
+        """登记样本外段起点（v2.7）。只能在想法进入 backtesting 之前登记，且只能登记一次：
+        先定好“最后一段数据不看”，再开始回测；之后想换日期，只能否掉这个想法、重新登记一个新想法。"""
+        it = self.get(iid)
+        if it.holdout_start:
+            raise ValueError(f"{iid} 已登记样本外起点 {it.holdout_start}（{it.holdout_registered_at}），不能修改")
+        if it.status not in ("proposed", "screening") or it.n_backtests:
+            raise ValueError(f"{iid} 已经开始回测（状态 {it.status}）：样本外起点必须在回测之前登记")
+        ts = pd.Timestamp(start)
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+        self._append({"kind": "holdout", "id": iid, "at": pd.Timestamp.now(tz="UTC").isoformat(),
+                      "start": ts.strftime("%Y-%m-%d"), "by": by})
         return self.get(iid)
 
     def attach(self, iid: str, kind: str, path: str = "", summary: str = "", verdict: str | None = None) -> Idea:

@@ -58,7 +58,7 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
     if res.get("failed"):
         lines.append(f"- 未通过：{', '.join(res['failed'])}")
     ch = res.get("checks", {})
-    names = {"bootstrap_mean_R": "期望 R 的 Bootstrap 区间下限 > 0", "sign_flip": "符号翻转检验 p < 阈值",
+    names = {"bootstrap_mean_R": "期望 R 的 Bootstrap 区间下限 > 0",
              "segment_consistency": "分段一致性：期望 R > 0 的时间段占比（同一批结果切段，不是训练-测试验证）",
              "block_bootstrap": "按周汇总 R 的 Bootstrap 区间下限 > 0", "holdout": "样本外段期望 R > 0",
              "deflated_sharpe": "Deflated Sharpe（按尝试次数折扣）"}
@@ -76,12 +76,15 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
             elif k == "block_bootstrap":
                 num = (f"{c['blocks']} 个时间块，区间 [{c['ci_lower']}, {c['ci_upper']}]" if "error" not in c else c["error"])
             elif k == "holdout":
-                num = (f"自 {c['start']} 起 {c['n']} 笔，期望 R {c['mean_R']}" if "mean_R" in c
-                       else c.get("error") or c.get("note", ""))
+                num = (f"自 {c['start']} 起入场 {c['n']} 笔，期望 R {c['mean_R']}；跨边界排除 {c.get('n_straddle_excluded')} 笔，"
+                       f"占时间 {c.get('holdout_time_frac')}" if "mean_R" in c else c.get("error") or c.get("note", ""))
             else:
                 num = (f"DSR = {c.get('deflated_sharpe_ratio')}，尝试 {c.get('n_trials')} 次，运气门槛 Sharpe {c.get('expected_maximum_sharpe')}"
                        if "deflated_sharpe_ratio" in c else c.get("note") or c.get("error", ""))
             lines.append(f"| {names.get(k, k)} | {p} | {num} |")
+    if res.get("reference", {}).get("sign_flip"):
+        sfr = res["reference"]["sign_flip"]
+        lines += ["", f"参考（不参与判定）：符号翻转检验 p = {sfr['p_value']}。{sfr['note']}。"]
     if "sharpe" in res:
         s = res["sharpe"]
         lines += ["", f"每笔 Sharpe {s['sharpe_per_trade']}，偏度 {s['skew']}，峰度 {s['kurtosis']}，"
@@ -117,3 +120,18 @@ def matrix_md(res: dict[str, Any]) -> str:
                   f"_{res.get('note', '')}_"]
     lines += ["", stats_md(res["pooled"], f"基准方案（{res['base_variant']}）合并检验").replace("# ", "## ", 1)]
     return "\n".join(lines)
+
+
+def verdict_md(res: dict[str, Any]) -> str:
+    lines = ["# 上线判定（程序生成）", "", f"- 想法：{res.get('idea')}", f"- **结论：{res['verdict']}**",
+             f"- 不通过：{', '.join(res['failed']) or '无'}；无法判定：{', '.join(res['missing']) or '无'}",
+             f"- 策略声明的必需压力方案：{', '.join(res['required_stress']) or '（无）'}", "",
+             "| 压力方案 | 状态 | 笔数 | 期望 R | 结果 |", "| --- | --- | --- | --- | --- |"]
+    for k, v in res["stress"].items():
+        p = {True: "通过", False: "不通过", None: "无法判定"}[v.get("pass")]
+        lines.append(f"| {k} | {v.get('state')} | {v.get('n', '')} | {v.get('mean_R', '')} | {p}：{v.get('error', '')} |")
+    if res.get("data_gaps"):
+        lines += ["", "研究数据缺口（存在时最多判“证据不足”）：", ""] + [f"- {g}" for g in res["data_gaps"]]
+    lines += ["", "运行记录：", ""] + [f"- {k}：{v}" for k, v in res.get("runs", {}).items()]
+    lines += ["", stats_md(res["base"], "基准组合回测的检验").replace("# ", "## ", 1), "", f"_{res.get('note', '')}_"]
+    return "\n".join(lines) + "\n"

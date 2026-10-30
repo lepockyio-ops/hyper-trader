@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import os
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -93,7 +95,8 @@ def test_plan_manifest_aggregate_excludes_other_versions_and_portfolio_runs(tmp_
     a = ns(); a.coins, a.years, a.impl, a.variants = "BTC", "2024-2024", "A", "base"
     assert rm.cmd_plan(a) == 0
     m = rm.load_manifest()
-    assert m["jobs"] == ["BTC-2024-A-base"] and len(m["fingerprint"]) == 16
+    assert m["jobs"] == ["BTC-2024-A-base", "BTC-2024-A-cost2x", "BTC-2024-A-funding2x"] and len(m["fingerprint"]) == 16
+    assert m["required_stress"] == ["cost2x", "funding2x"]                 # 插件声明的必需压力方案自动加入
     a.job = "BTC-2024-A-base"
     assert rm.cmd_run(a) == 0
     assert rm.cmd_aggregate(a) == 0
@@ -101,7 +104,54 @@ def test_plan_manifest_aggregate_excludes_other_versions_and_portfolio_runs(tmp_
     meta["fingerprint"] = "other-version"
     (rm.RES / "BTC-2024-A-base.json").write_text(json.dumps(meta), "utf-8")
     assert rm.cmd_aggregate(a) == 1                       # 版本不一致：不汇总
-    p = ns(); p.coins, p.since, p.impl, p.variant = "BTC,SOL", "2024-01-01", "A", "base"
+    monkeypatch.setattr(rm, "PORTFOLIO", rm.RES / "portfolio")
+    monkeypatch.setattr(rm, "EVENTS", tmp_path / "research" / "none.json")
+    p = ns(); p.coins, p.since, p.impl, p.variant, p.all = "BTC,SOL", "2024-01-01", "A", "base", True
     assert rm.cmd_portfolio(p) == 0
-    res = json.loads((rm.RES / "portfolio" / "base.json").read_text("utf-8"))
-    assert res["per_coin_signals"].keys() == {"BTC", "SOL"} and "近似" in res["note"]
+    man = json.loads((rm.PORTFOLIO / "manifest.json").read_text("utf-8"))
+    assert man["required_stress"] == ["cost2x", "funding2x"] and man["variants"] == ["base", "cost2x", "funding2x"]
+    res = json.loads((rm.PORTFOLIO / "base" / "latest.json").read_text("utf-8"))
+    assert res["status"] == "ok" and res["per_coin_signals"].keys() == {"BTC", "SOL"} and "近似" in res["note"]
+    assert any("事件" in g for g in res["data_gaps"]) and (rm.PORTFOLIO / "base" / res["csv"]).is_file()
+    # 失败的运行也成为 latest：旧的成功结果不能再被读到（审查 v2.6 P1-4）
+    monkeypatch.setattr(rm, "load", lambda c, b: (_ for _ in ()).throw(OSError("数据坏了")))
+    assert rm.portfolio_run("base", "2024-01-01", "BTC", "A", {"id": "x"})["status"] == "error"
+    assert json.loads((rm.PORTFOLIO / "base" / "latest.json").read_text("utf-8"))["status"] == "error"
+
+
+def test_required_stress_follows_the_plugin(monkeypatch):
+    from s03.strategy.api import StrategyPlugin
+
+    class Custom(StrategyPlugin):
+        research_stress = ("cost2x",)
+
+    class Bad(StrategyPlugin):
+        research_stress = ("cost2x", "moon")
+
+    for klass, expect in ((Custom, ["cost2x"]), (Bad, None)):
+        monkeypatch.setattr("s03.strategy.api.load_strategy", lambda cfg, k=klass: k(cfg))
+        if expect is None:
+            with pytest.raises(SystemExit, match="moon"):
+                rm.strategy_requirements()
+        else:
+            assert rm.strategy_requirements()["required_stress"] == expect
+
+
+def test_replay_applies_event_windows():
+    """回放与实盘一致：事件窗口内不新开仓（v2.7；v2.6 回放没有事件窗口）。"""
+    from s03.research.replay import run_replay
+
+    rng = np.random.default_rng(3)
+    idx15 = pd.date_range("2024-01-01", periods=4000, freq="15min", tz="UTC")
+    px = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.004, len(idx15))))
+    bars = pd.DataFrame({"open": px, "high": px * 1.004, "low": px * 0.996, "close": px, "volume": 1.0}, index=idx15)
+    daily = bars.resample("1D").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+    pre = pd.DataFrame({"open": 90.0, "high": 91.0, "low": 89.0, "close": 90.0, "volume": 1.0},
+                       index=pd.date_range("2023-06-01", "2023-12-31", freq="D", tz="UTC"))
+    daily = pd.concat([pre, daily])
+    s = rm.settings_for("base")
+    s = replace(s, strategy=replace(s.strategy, plugin="s03.strategies.examples.sma_cross:SmaCrossExample"))
+    free, _ = run_replay("BTC", daily, bars, s, 40, warmup_days=60)
+    every_hour = [t.isoformat() for t in pd.date_range("2023-12-31", "2024-03-01", freq="2h", tz="UTC")]
+    blocked, _ = run_replay("BTC", daily, bars, s, 40, warmup_days=60, event_times=every_hour)
+    assert len(free) > 0 and len(blocked) == 0

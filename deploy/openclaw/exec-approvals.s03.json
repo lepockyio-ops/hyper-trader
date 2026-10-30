@@ -60,7 +60,7 @@
         },
         {
           "pattern": "python3",
-          "argPattern": "^scripts/research_matrix\\.py (fetch|plan|run|verify|aggregate|portfolio)( [A-Za-z0-9_.=:/,-]+)*$"
+          "argPattern": "^scripts/research_matrix\\.py (fetch|plan|run|verify|aggregate|portfolio|verdict|fingerprint)( [A-Za-z0-9_.=:/,-]+)*$"
         },
         {
           "pattern": "python3",
@@ -72,7 +72,7 @@
         },
         {
           "pattern": "python3",
-          "argPattern": "^scripts/run\\.py lab idea (add|list|show|move|attach|trials)(?!.*--by human)(?!.*--approver)( [^\\n]{1,2000})?$"
+          "argPattern": "^scripts/run\\.py lab idea (add|list|show|move|attach|trials|holdout)(?!.*--by human)(?!.*--approver)( [^\\n]{1,2000})?$"
         },
         {
           "pattern": "python3",

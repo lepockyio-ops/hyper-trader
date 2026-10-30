@@ -33,6 +33,7 @@ DEFAULT_GATES: dict[str, Any] = {
     "min_trades": 30,            # 少于此数 → 证据不足，不做检验
     "pass_min_trades": 100,      # 判“通过”至少需要的笔数（G1：≥ 100 笔；30–99 笔最多判“证据不足”）
     "holdout_min_trades": 10,    # 样本外段至少的笔数
+    "holdout_min_frac": 0.2,     # 样本外段至少占全部时间跨度的比例（G2 写的是“最后 30%”，这里留余量，示例值）
     "block_freq": "W",           # 按时间块（周）汇总 R 再做 Bootstrap：同时持仓、行情聚集时比逐笔 Bootstrap 保守
     "confidence": 0.95,          # 置信水平
     "boot_lower_R": 0.0,         # 期望 R 的 Bootstrap 区间下限必须 > 此值
@@ -347,15 +348,47 @@ def _safe_sharpe(x, ddof):
 
 
 # ======================================================================== 汇总判定
+ENTRY_COLS = ("entry_time", "open_date", "open_time")
+
+
+def holdout_check(trades: pd.DataFrame, holdout_start: str | None, registered: bool, time_col: str,
+                  g: dict) -> dict[str, Any]:
+    """样本外段（v2.7）：按**入场时间**归属。切分日之前入场、之后平仓的跨边界持仓两边都不算，单独报告笔数。
+    只有在想法登记簿里、回测之前登记的起点才算数（registered=True），否则判“无法判定”。
+    同时检查样本外段大约是最后一段：时间跨度占全部样本的比例不低于 holdout_min_frac。"""
+    if not holdout_start:
+        return {"pass": None, "note": "未登记样本外段（idea holdout --id … --start …，必须在回测之前）"}
+    ecol = next((c for c in ENTRY_COLS if c in trades), None)
+    if ecol is None or time_col not in trades:
+        return {"pass": None, "start": holdout_start, "error": "逐笔文件缺少入场时间列，无法按入场时间切分样本外段"}
+    start = pd.Timestamp(holdout_start)
+    start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    ent = pd.to_datetime(trades[ecol], utc=True)
+    ext = pd.to_datetime(trades[time_col], utc=True)
+    after = (ent >= start).to_numpy()
+    straddle = ((ent < start) & (ext >= start)).to_numpy()
+    ho = _clean(trades.loc[after, "R"])
+    span = (ext.max() - ent.min()).total_seconds()
+    frac = float((ext.max() - start).total_seconds() / span) if span > 0 else 0.0
+    out = {"start": holdout_start, "registered": registered, "n": int(ho.size), "n_straddle_excluded": int(straddle.sum()),
+           "holdout_time_frac": round(frac, 3)}
+    if not registered:
+        return {**out, "pass": None, "error": "样本外起点没有在想法登记簿里事先登记：只能作参考"}
+    if frac < g["holdout_min_frac"]:
+        return {**out, "pass": None, "error": f"样本外段只占时间跨度的 {frac:.0%}，少于 {g['holdout_min_frac']:.0%}"}
+    if ho.size < g["holdout_min_trades"]:
+        return {**out, "pass": None, "error": f"样本外段只有 {ho.size} 笔 < {int(g['holdout_min_trades'])} 笔"}
+    return {**out, "pass": float(ho.mean()) > 0, "mean_R": round(float(ho.mean()), 4)}
+
+
 def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials: int = 1,
                     trial_sharpe_std: float | None = None, gates: dict | None = None, time_col: str = "time",
-                    seed: int = 42, holdout_start: str | None = None) -> dict[str, Any]:
-    """对一组逐笔交易（列 R 与 time_col）跑全部检验，给出“通过 / 不通过 / 证据不足”。
-    判定（v2.6 起）：任一必需检验不通过 → 不通过；任一必需检验无法判定（缺样本外段、缺 DSR 所需数据等）→ 证据不足；
-    笔数 < pass_min_trades（100）→ 证据不足；其余 → 通过。
-    必需检验：Bootstrap 期望 R、符号翻转、按时间块 Bootstrap、分段一致性、Deflated Sharpe、样本外段。
-    n_trials：为了得到这条策略总共试过多少种方案（含想法登记簿里回测过的想法）；只试过 1 种时 DSR 退化为 PSR。
-    holdout_start：样本外段起点（UTC 日期）；之前的数据用于选参数，之后的数据只看一次。"""
+                    seed: int = 42, holdout_start: str | None = None, holdout_registered: bool = False) -> dict[str, Any]:
+    """对一组逐笔交易（列 R、平仓时间 time_col、入场时间 entry_time）跑全部检验，给出“通过 / 不通过 / 证据不足”。
+    判定：任一必需检验不通过 → 不通过；任一必需检验无法判定 → 证据不足；笔数 < pass_min_trades（100）→ 证据不足；其余 → 通过。
+    必需检验：Bootstrap 期望 R、按时间块 Bootstrap、分段一致性、Deflated Sharpe、样本外段（按入场时间、须事先登记）。
+    符号翻转检验只报告、不参与判定（v2.7）：它假设零假设下 R 关于 0 对称，止损截断在 −1R、盈利长尾时这个前提不成立。
+    n_trials：为了得到这条策略总共试过多少种方案（含想法登记簿里回测过的想法）；只试过 1 种时 DSR 退化为 PSR。"""
     g = {**DEFAULT_GATES, **(gates or {})}
     r = _clean(trades["R"]) if "R" in trades else np.array([])
     out: dict[str, Any] = {"n_trades": int(r.size), "gates": g, "gate_label": "示例值（未经数据验证）"}
@@ -369,8 +402,8 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
     bm = bootstrap_mean_ci(r, confidence=g["confidence"], seed=seed)
     checks["bootstrap_mean_R"] = {"pass": bm["ci_lower"] > g["boot_lower_R"], **bm}
     sf = sign_flip_test(r, seed=seed)
-    checks["sign_flip"] = {"pass": sf["p_value"] < g["sign_flip_p"], **sf,
-                           "note": "假设零假设下 R 关于 0 对称；止损截断、盈利长尾时只作参考，以 Bootstrap 为主"}
+    out["reference"] = {"sign_flip": {**sf, "below_threshold": sf["p_value"] < g["sign_flip_p"],
+                                      "note": "只报告、不参与判定：假设零假设下 R 关于 0 对称，止损截断、盈利长尾时不成立"}}
     bb = block_bootstrap_mean_ci(trades, time_col, g["block_freq"], confidence=g["confidence"], seed=seed) \
         if time_col in trades else {"error": f"缺少时间列 {time_col}"}
     checks["block_bootstrap"] = {"pass": (bb["ci_lower"] > 0) if "error" not in bb else None, **bb}
@@ -397,17 +430,7 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
     else:
         checks["deflated_sharpe"] = {"pass": None, "note": "尝试 ≥ 2 次但缺各方案 Sharpe 离散度：无法折扣"}
 
-    if holdout_start and time_col in trades:
-        t = pd.to_datetime(trades[time_col], utc=True)
-        ho = _clean(trades.loc[(t >= pd.Timestamp(holdout_start, tz="UTC")).values, "R"])
-        if ho.size < g["holdout_min_trades"]:
-            checks["holdout"] = {"pass": None, "n": int(ho.size), "start": holdout_start,
-                                 "error": f"样本外段只有 {ho.size} 笔 < {int(g['holdout_min_trades'])} 笔"}
-        else:
-            checks["holdout"] = {"pass": float(ho.mean()) > 0, "n": int(ho.size), "start": holdout_start,
-                                 "mean_R": round(float(ho.mean()), 4)}
-    else:
-        checks["holdout"] = {"pass": None, "note": "未指定样本外段（--holdout-start）"}
+    checks["holdout"] = holdout_check(trades, holdout_start, holdout_registered, time_col, g)
 
     out["sharpe"] = info
     out["bootstrap_sharpe"] = bootstrap_sharpe_ci(r, confidence=g["confidence"], seed=seed)
@@ -424,6 +447,50 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
     else:
         out["verdict"] = "通过"
     return out
+
+
+STOP_EXITS = ("stop_loss", "stoploss_on_exchange", "trailing_stop_loss", "liquidation", "stop")
+
+
+def stop_slip_trades(trades: pd.DataFrame, slip: float) -> pd.DataFrame | None:
+    """止损滑点压力（事后近似，v2.7）：止损离场的交易，每笔再扣 slip × 入场名义价值，按初始风险折成 R。
+    需要列 exit_reason、notional、risk；缺列返回 None（判“证据不足”）。部分止盈后的剩余仓位按全部名义价值扣，偏保守。"""
+    need = {"R", "exit_reason", "notional", "risk"}
+    if not need <= set(trades.columns):
+        return None
+    out = trades.copy()
+    hit = out["exit_reason"].astype(str).str.lower().isin(STOP_EXITS) & (out["risk"] > 0)
+    out.loc[hit, "R"] = out.loc[hit, "R"] - slip * out.loc[hit, "notional"] / out.loc[hit, "risk"]
+    return out
+
+
+def stress_check(name: str, state: dict | None, base_n: int) -> dict[str, Any]:
+    """一个必需压力方案的判定（v2.7）：没有这个任务 / 任务失败 → 无法判定；基准有交易而压力方案零交易 → 不通过；
+    否则期望 R > 0 为通过（示例门槛）。state = {"status": ok|error|…, "trades": DataFrame|None}。"""
+    if state is None:
+        return {"variant": name, "pass": None, "state": "missing", "error": "没有运行这个压力方案"}
+    if state.get("status") != "ok" or state.get("trades") is None:
+        return {"variant": name, "pass": None, "state": "failed", "error": state.get("error") or f"状态 {state.get('status')}"}
+    r = _clean(state["trades"]["R"]) if len(state["trades"]) else np.array([])
+    if r.size == 0:
+        return {"variant": name, "pass": False if base_n > 0 else None, "state": "zero_trades", "n": 0,
+                "error": "压力方案下没有任何交易"}
+    return {"variant": name, "pass": float(r.mean()) > 0, "state": "ok", "n": int(r.size), "mean_R": round(float(r.mean()), 4)}
+
+
+def final_verdict(base: pd.DataFrame, stresses: dict[str, dict | None], required: Sequence[str], *, holdout_start=None,
+                  holdout_registered=False, n_trials: int = 1, trial_sharpe_std: float | None = None,
+                  time_col: str = "time", risk_fraction: float = 0.005) -> dict[str, Any]:
+    """上线判定（v2.7）：只基于组合回测的逐笔记录 + 策略声明的全部必需压力方案。
+    required 由策略声明（freq-trader：FrameworkStrategy.research_stress；hyper-trader：插件的 research_stress），
+    在 plan / portfolio 时写进清单；缺任一方案、方案失败 → 证据不足；零交易 → 不通过。"""
+    base_eval = evaluate_trades(base, risk_fraction, n_trials, trial_sharpe_std, time_col=time_col,
+                                holdout_start=holdout_start, holdout_registered=holdout_registered)
+    st = {name: stress_check(name, stresses.get(name), base_eval["n_trades"]) for name in required}
+    parts = {"base": base_eval["verdict"], **{f"stress:{k}": v["pass"] for k, v in st.items()}}
+    verdict, failed, missing = combine_verdicts(parts)
+    return {"verdict": verdict, "failed": failed, "missing": missing, "required_stress": list(required),
+            "base": base_eval, "stress": st}
 
 
 def combine_verdicts(parts: dict[str, str | bool | None]) -> tuple[str, list[str], list[str]]:

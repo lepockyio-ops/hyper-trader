@@ -48,6 +48,30 @@ ROOT = Path("research")
 DATA, RES = ROOT / "data", ROOT / "results"
 PLATFORM_MAX = {"BTC": 40, "ETH": 25, "SOL": 20, "BNB": 10, "HYPE": 10}   # 2026-10-28 快照（Hyperliquid meta）
 VARIANTS = ("base", "stop_floor", "cost2x", "funding2x")
+STRESS_OPTIONS = {"cost2x", "funding2x"}          # 插件可在 research_stress 里声明的压力方案
+EVENTS = Path(os.environ.get("S03_RESEARCH_EVENTS", "research/events_history.json"))
+PORTFOLIO = RES / "portfolio"
+
+
+def event_times() -> list[str] | None:
+    """历史事件（python -m s03.events_calendar --out research/events_history.json --history 生成）；没有返回 None。"""
+    try:
+        return [e["time_utc"] for e in json.loads(EVENTS.read_text("utf-8")).get("events", [])]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def strategy_requirements() -> dict:
+    """读插件声明的研究要求（research_stress）。必需压力方案随策略而定。"""
+    from s03.strategy.api import load_strategy
+
+    s = load_settings()
+    plugin = load_strategy(s.strategy)
+    req = list(getattr(plugin, "research_stress", ("cost2x", "funding2x")))
+    unknown = set(req) - STRESS_OPTIONS
+    if unknown:
+        raise SystemExit(f"{s.strategy.plugin} 的 research_stress 含未知压力方案 {sorted(unknown)}；可选 {sorted(STRESS_OPTIONS)}")
+    return {"strategy": s.strategy.plugin, "required_stress": req}
 
 
 def job_id(coin: str, year: int, impl: str, variant: str) -> str:
@@ -115,7 +139,7 @@ def run_job(jid: str) -> dict:
         return {"job": jid, "status": "no_data", "bars": int(len(bars_y)), "fingerprint": fingerprint()["id"]}
     warm = int((daily_y.index < lo).sum())
     trades, summary = run_replay(coin, daily_y, bars_y, s, PLATFORM_MAX[coin], impl=impl,
-                                 warmup_days=max(30, min(warm, 400)))
+                                 warmup_days=max(30, min(warm, 400)), event_times=event_times())
     csv = trades.to_csv(index=False).encode()
     return {"_trades": trades, "job": jid, "status": "ok", "coin": coin, "year": year, "impl": impl, "variant": variant,
             "bars": int(len(bars_y)), "data_hash": {b: file_hash(DATA / f"{coin}_{b}.csv") for b in ("1Dutc", "15m")},
@@ -139,20 +163,28 @@ def settings_for(variant: str):
 
 
 def fingerprint() -> dict:
-    """结果属于哪个版本：代码（s03、fwresearch、本脚本）、settings、数据文件。任何一项变了，旧结果就不再被汇总。"""
+    """结果属于哪个版本（v2.7）：代码（s03、fwresearch、本脚本）、解析后的研究相关设置（策略 / 成本 / 风控，
+    含 S03_SETTINGS 指向的文件）、依赖版本、历史事件文件、数据文件内容校验和。任何一项变了，旧结果就不再被汇总或判定。"""
+    import platform
+    from dataclasses import asdict
+
+    import numpy
+
     root = Path(__file__).resolve().parents[1]
     h = hashlib.sha256()
     files = sorted(list((root / "s03").rglob("*.py")) + list((root / "fwresearch").rglob("*.py")) + [Path(__file__).resolve()])
     for f in files:
         h.update(str(f.relative_to(root)).encode())
         h.update(f.read_bytes())
-    for f in (root / "config" / "settings.toml", root / "config" / "settings.example.toml"):
-        h.update(f.read_bytes() if f.exists() else b"<missing>")
+    st = load_settings()
+    cfg = json.dumps({"strategy": asdict(st.strategy), "cost": asdict(st.cost), "risk": asdict(st.risk)},
+                     sort_keys=True, default=str)
     d = hashlib.sha256()
     for f in sorted(DATA.glob("*.csv")) if DATA.exists() else []:
-        st = f.stat()
-        d.update(f"{f.name}:{st.st_size}:{int(st.st_mtime)}".encode())
-    parts = {"code": h.hexdigest()[:16], "data": d.hexdigest()[:16]}
+        d.update(f"{f.name}:{hashlib.sha256(f.read_bytes()).hexdigest()}".encode())
+    parts = {"code": h.hexdigest()[:16], "settings": hashlib.sha256(cfg.encode()).hexdigest()[:16],
+             "events": file_hash(EVENTS) if EVENTS.exists() else "none", "data": d.hexdigest()[:16],
+             "versions": f"python {platform.python_version()}; pandas {pd.__version__}; numpy {numpy.__version__}"}
     parts["id"] = hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
     return parts
 
@@ -197,8 +229,9 @@ def cmd_verify(a) -> int:
     stored = json.loads((RES / f"{a.job}.json").read_text("utf-8"))
     fresh = run_job(a.job)
     fresh.pop("_trades", None)
-    same = (stored.get("trades_hash") == fresh.get("trades_hash") and stored.get("data_hash") == fresh.get("data_hash")
-            and stored.get("fingerprint") == fresh.get("fingerprint"))
+    ok = stored.get("status") == "ok" and fresh.get("status") == "ok" and stored.get("trades_hash") and fresh.get("trades_hash")
+    same = bool(ok) and (stored.get("trades_hash") == fresh.get("trades_hash") and stored.get("data_hash") == fresh.get("data_hash")
+                         and stored.get("fingerprint") == fresh.get("fingerprint"))
     print(json.dumps({"job": a.job, "match": same, "stored": stored.get("trades_hash"),
                       "fresh": fresh.get("trades_hash")}, ensure_ascii=False))
     return 0 if same else 1
@@ -206,13 +239,15 @@ def cmd_verify(a) -> int:
 
 def cmd_plan(a) -> int:
     y0, y1 = (int(x) for x in a.years.split("-"))
+    req = strategy_requirements()
+    variants = list(dict.fromkeys(a.variants.split(",") + req["required_stress"]))
     jobs = [job_id(c, y, i, v) for c in a.coins.split(",") for y in range(y0, y1 + 1)
-            for i in a.impl.split(",") for v in a.variants.split(",")]
+            for i in a.impl.split(",") for v in variants]
     for j in jobs:
         parse_job(j)
     ROOT.mkdir(exist_ok=True)
     fp = fingerprint()
-    (ROOT / "jobs.json").write_text(json.dumps({"jobs": jobs, "fingerprint": fp["id"], "fingerprint_parts": fp,
+    (ROOT / "jobs.json").write_text(json.dumps({"jobs": jobs, "fingerprint": fp["id"], "fingerprint_parts": fp, **req,
                                                 "created": pd.Timestamp.now(tz="UTC").isoformat()}, indent=1), "utf-8")
     print(f"{len(jobs)} 个任务 → research/jobs.json（版本指纹 {fp['id']}）")
     return 0
@@ -231,6 +266,7 @@ def cmd_fetch(a) -> int:
 
 def cmd_aggregate(a) -> int:
     m = load_manifest()
+    m["fingerprint"] = fingerprint()["id"]                  # 按当前版本判断（清单若属于旧版本，旧结果一律排除）
     rows, skipped = [], []
     for j in m["jobs"]:
         try:
@@ -263,40 +299,97 @@ def cmd_aggregate(a) -> int:
     return 0
 
 
-def cmd_portfolio(a) -> int:
-    """组合回测：每个币连续时间回放，再按组合约束取舍（fwresearch.portfolio.overlay）。"""
+def _write_atomic(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1, default=str), "utf-8")
+    os.replace(tmp, path)
+
+
+def portfolio_run(variant: str, since: str, coins: str, impl: str, fp: dict) -> dict:
+    """组合回测一个方案（每个币连续时间回放 → fwresearch.portfolio.overlay 按组合约束取舍）。
+    v2.7：每次运行一个独立目录 run-<时间>；latest.json 原子替换，失败也会成为 latest（状态 error）。"""
     from fwresearch.portfolio import overlay
     from s03.research.replay import run_replay
 
-    s = settings_for(a.variant)
-    since = pd.Timestamp(a.since, tz="UTC")
-    frames, per_coin = [], {}
-    for coin in a.coins.split(","):
-        daily, bars15 = load(coin, "1Dutc"), load(coin, "15m")
-        bars = bars15[bars15.index >= since]
-        if len(bars) < 1000:
-            per_coin[coin] = "no_data"
-            continue
-        warm = int((daily.index < since).sum())
-        trades, _ = run_replay(coin, daily, bars, s, PLATFORM_MAX[coin], impl=a.impl, warmup_days=max(30, min(warm, 400)))
-        per_coin[coin] = int(len(trades))
-        if len(trades):
-            frames.append(trades.rename(columns={"exit_time": "time"}).assign(coin=coin)[["coin", "entry_time", "time", "R", "pnl"]])
-    allt = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["coin", "entry_time", "time", "R", "pnl"])
-    r = s.risk
-    res = overlay(allt, r.risk_per_trade, r.max_open_risk, r.max_positions)
-    out_dir = RES / "portfolio"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    taken = res.pop("trades")
-    if len(taken):
-        taken.assign(job=f"portfolio-{a.variant}", variant=a.variant, year=0, impl=a.impl).rename(
-            columns={"pnl_portfolio": "pnl_account"})[["job", "coin", "year", "impl", "variant", "entry_time", "time", "R",
-                                                        "pnl_account"]].to_csv(out_dir / f"{a.variant}.csv", index=False)
-    res.update(variant=a.variant, since=a.since, per_coin_signals=per_coin, fingerprint=fingerprint(),
-               note="交易层近似：被挡掉的交易之后的信号不重算、不检查相关性；回放不应用事件窗口与新闻守卫")
-    (out_dir / f"{a.variant}.json").write_text(json.dumps(res, ensure_ascii=False, indent=1, default=str), "utf-8")
-    print(json.dumps({k: res[k] for k in ("variant", "n_signals", "n_taken", "n_rejected", "return_pct",
-                                          "max_drawdown_closed")}, ensure_ascii=False))
+    run_id = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%S%fZ")
+    vdir = PORTFOLIO / variant
+    rdir = vdir / f"run-{run_id}"
+    rdir.mkdir(parents=True, exist_ok=True)
+    res = {"kind": "portfolio", "variant": variant, "since": since, "run_id": run_id, "fingerprint": fp["id"],
+           "fingerprint_parts": fp, "impl": impl}
+    try:
+        s = settings_for(variant)
+        start = pd.Timestamp(since, tz="UTC")
+        evs = event_times()
+        frames, per_coin, gaps = [], {}, []
+        if evs is None:
+            gaps.append(f"没有历史事件文件 {EVENTS}：回放里没有事件窗口（实盘会在事件前后拒绝开仓）")
+        for coin in coins.split(","):
+            daily, bars15 = load(coin, "1Dutc"), load(coin, "15m")
+            bars = bars15[bars15.index >= start]
+            if len(bars) < 1000:
+                per_coin[coin] = "no_data"
+                gaps.append(f"{coin} 的 15 分钟数据不足")
+                continue
+            if bars.index.min() > start + pd.Timedelta(days=7):
+                gaps.append(f"{coin} 的 15 分钟数据从 {bars.index.min():%Y-%m-%d} 才有（组合回测从 {since} 开始）")
+            warm = int((daily.index < start).sum())
+            trades, _ = run_replay(coin, daily, bars, s, PLATFORM_MAX[coin], impl=impl,
+                                   warmup_days=max(30, min(warm, 400)), event_times=evs)
+            per_coin[coin] = int(len(trades))
+            if len(trades):
+                frames.append(trades.rename(columns={"exit_time": "time"}).assign(coin=coin)[["coin", "entry_time", "time", "R", "pnl"]])
+        allt = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["coin", "entry_time", "time", "R", "pnl"])
+        r = s.risk
+        ov = overlay(allt, r.risk_per_trade, r.max_open_risk, r.max_positions)
+        taken = ov.pop("trades")
+        cols = ["job", "coin", "year", "impl", "variant", "entry_time", "time", "R", "pnl_account"]
+        out = (taken.assign(job=f"portfolio-{variant}", variant=variant, year=0, impl=impl).rename(
+            columns={"pnl_portfolio": "pnl_account"})[cols] if len(taken) else pd.DataFrame(columns=cols))
+        csv = rdir / "trades.csv"
+        out.to_csv(csv, index=False)
+        res.update(status="ok", **ov, per_coin_signals=per_coin, n_trades=int(len(out)), data_gaps=gaps,
+                   csv=f"run-{run_id}/trades.csv", csv_sha256=hashlib.sha256(csv.read_bytes()).hexdigest(),
+                   note="交易层近似：被挡掉的交易之后的信号不重算、不检查相关性；回放不应用新闻守卫")
+    except Exception as e:                                   # noqa: BLE001
+        res.update(status="error", error=f"{type(e).__name__}: {e}")
+    _write_atomic(rdir / "run.json", res)
+    _write_atomic(vdir / "latest.json", res)
+    return res
+
+
+def cmd_portfolio(a) -> int:
+    fp = fingerprint()
+    req = strategy_requirements()
+    variants = ["base"] + req["required_stress"] if a.all else [a.variant]
+    PORTFOLIO.mkdir(parents=True, exist_ok=True)
+    if a.all:
+        _write_atomic(PORTFOLIO / "manifest.json", {**req, "fingerprint": fp["id"], "since": a.since, "variants": variants,
+                                                    "created": pd.Timestamp.now(tz="UTC").isoformat()})
+    rc = 0
+    for v in variants:
+        res = portfolio_run(v, a.since, a.coins, a.impl, fp)
+        rc |= 0 if res.get("status") == "ok" else 1
+        print(json.dumps({k: res.get(k) for k in ("variant", "status", "run_id", "n_signals", "n_taken", "n_rejected",
+                                                  "return_pct", "max_drawdown_closed", "data_gaps", "error")},
+                         ensure_ascii=False, default=str))
+    return rc
+
+
+def cmd_verdict(a) -> int:
+    import subprocess
+
+    fp = fingerprint()["id"]
+    man = PORTFOLIO / "manifest.json"
+    if man.exists() and json.loads(man.read_text("utf-8")).get("fingerprint") != fp:
+        print(json.dumps({"warning": "组合回测清单属于旧版本：用 portfolio --all 重跑"}, ensure_ascii=False))
+    args = [sys.executable, "-m", "fwresearch", "verdict", "--idea", a.idea, "--results", str(PORTFOLIO),
+            "--current-fingerprint", fp] + (["--trial-sharpe-std", a.trial_sharpe_std] if a.trial_sharpe_std else [])
+    return subprocess.run(args).returncode
+
+
+def cmd_fingerprint(a) -> int:
+    print(json.dumps(fingerprint(), ensure_ascii=False))
     return 0
 
 
@@ -320,9 +413,14 @@ def main() -> int:
     pf.add_argument("--since", default="2022-01-01")
     pf.add_argument("--impl", default="A")
     pf.add_argument("--variant", default="base", choices=VARIANTS)
+    pf.add_argument("--all", action="store_true", help="base + 插件声明的全部必需压力方案，并写组合回测清单")
+    vd = sub.add_parser("verdict", help="上线判定：组合回测 + 插件声明的全部必需压力方案 + 登记的样本外段")
+    vd.add_argument("--idea", required=True)
+    vd.add_argument("--trial-sharpe-std", default="")
+    sub.add_parser("fingerprint")
     a = ap.parse_args()
-    return {"fetch": cmd_fetch, "plan": cmd_plan, "run": cmd_run, "verify": cmd_verify,
-            "aggregate": cmd_aggregate, "portfolio": cmd_portfolio}[a.cmd](a)
+    return {"fetch": cmd_fetch, "plan": cmd_plan, "run": cmd_run, "verify": cmd_verify, "aggregate": cmd_aggregate,
+            "portfolio": cmd_portfolio, "verdict": cmd_verdict, "fingerprint": cmd_fingerprint}[a.cmd](a)
 
 
 if __name__ == "__main__":

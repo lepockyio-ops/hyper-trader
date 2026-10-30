@@ -155,11 +155,99 @@ def cmd_stats(a) -> int:
     n_trials = max(a.n_trials, 1)
     if a.ideas and Path(a.ideas).exists():
         n_trials = max(n_trials, IdeaBook(a.ideas).n_trials())
-    res = evaluate_trades(df, a.risk, n_trials, a.trial_sharpe_std, time_col=tc, holdout_start=a.holdout_start or None)
+    ho, registered = holdout_for(a)
+    res = evaluate_trades(df, a.risk, n_trials, a.trial_sharpe_std, time_col=tc, holdout_start=ho, holdout_registered=registered)
     res["input"] = str(a.trades)
+    res["note"] = "单份逐笔文件的检验；上线判定用 verdict（组合回测 + 策略声明的全部压力方案）"
+    side = [p for p in (Path(a.trades).with_suffix(".json"), Path(a.trades).parent / "run.json") if p.exists()]
+    if side:                                                             # 组合回测的 CSV：核对同目录的运行记录
+        meta = json.loads(side[0].read_text("utf-8"))
+        res["run"] = {k: meta.get(k) for k in ("status", "run_id", "fingerprint")}
+        if meta.get("status") != "ok":
+            res.update(verdict="证据不足", reason=f"运行记录状态 {meta.get('status')}：这份 CSV 不是成功运行的结果")
     paths = _save(a.out_dir, f"stats-{_stamp()}", res, report.stats_md(res))
     print(json.dumps({"verdict": res["verdict"], "n_trades": res["n_trades"], "failed": res.get("failed"), **paths},
                      ensure_ascii=False))
+    return 0
+
+
+def holdout_for(a) -> tuple[str | None, bool]:
+    """样本外起点：优先读想法登记簿里事先登记的值（--idea）；命令行 --holdout-start 只作参考（registered = False）。"""
+    if getattr(a, "idea", None):
+        it = IdeaBook(a.ideas).get(a.idea)
+        if it.holdout_start:
+            if getattr(a, "holdout_start", "") and a.holdout_start != it.holdout_start:
+                raise SystemExit(f"--holdout-start {a.holdout_start} 与登记值 {it.holdout_start} 不一致")
+            return it.holdout_start, True
+        return None, False
+    return (getattr(a, "holdout_start", "") or None), False
+
+
+# ---------------------------------------------------------------- 上线判定（组合回测 + 必需压力方案）
+def load_portfolio_results(root: str, current_fp: str | None) -> tuple[dict, dict, list[str]]:
+    """读组合回测的标准目录：<root>/manifest.json（required_stress、fingerprint）与 <root>/<方案>/latest.json。
+    只接受状态成功、版本指纹与当前一致、CSV 存在且哈希一致的运行；其余记为失败（不会读到旧结果）。"""
+    import hashlib
+
+    rootp = Path(root)
+    man_p = rootp / "manifest.json"
+    if not man_p.exists():
+        raise SystemExit(f"找不到 {man_p}：先运行组合回测（freq-trader：s03ft research portfolio --all；"
+                         "hyper-trader：scripts/research_matrix.py portfolio --all）")
+    manifest = json.loads(man_p.read_text("utf-8"))
+    states: dict[str, dict] = {}
+    for vdir in sorted(p for p in rootp.iterdir() if p.is_dir()):
+        latest = vdir / "latest.json"
+        if not latest.exists():
+            continue
+        m = json.loads(latest.read_text("utf-8"))
+        st = {"status": m.get("status"), "run_id": m.get("run_id"), "fingerprint": m.get("fingerprint"), "trades": None,
+              "data_gaps": list(m.get("data_gaps") or [])}
+        if m.get("status") == "ok":
+            csv = vdir / m.get("csv", "")
+            if current_fp and m.get("fingerprint") != current_fp:
+                st.update(status="stale", error="版本指纹与当前代码 / 配置 / 数据不一致")
+            elif not csv.is_file():
+                st.update(status="missing_csv", error="运行记录说成功，但逐笔文件不存在")
+            elif m.get("csv_sha256") and hashlib.sha256(csv.read_bytes()).hexdigest() != m["csv_sha256"]:
+                st.update(status="tampered", error="逐笔文件与运行记录的哈希不一致")
+            else:
+                st["trades"] = pd.read_csv(csv)
+        else:
+            st["error"] = m.get("error") or m.get("stderr_tail", "")[-300:]
+        states[vdir.name] = st
+    return manifest, states, list(manifest.get("required_stress") or [])
+
+
+def cmd_verdict(a) -> int:
+    from fwresearch.stats import final_verdict, stop_slip_trades
+
+    manifest, states, required = load_portfolio_results(a.results, a.current_fingerprint or None)
+    base = states.get("base")
+    if not base or base.get("trades") is None:
+        raise SystemExit(f"基准组合回测不可用：{(base or {}).get('status', '没有运行')} {(base or {}).get('error', '')}")
+    if "stopslip" in required:                                       # 事后近似：由 base 的逐笔记录算出
+        slip = float(manifest.get("stop_slip", 0.002))
+        sdf = stop_slip_trades(base["trades"], slip)
+        states["stopslip"] = ({"status": "ok", "trades": sdf} if sdf is not None
+                              else {"status": "error", "error": "逐笔文件缺少 exit_reason / notional / risk 列"})
+    a.holdout_start = ""
+    ho, registered = holdout_for(a)
+    n_trials = IdeaBook(a.ideas).n_trials() if Path(a.ideas).exists() else 1
+    res = final_verdict(base["trades"], states, required, holdout_start=ho, holdout_registered=registered,
+                        n_trials=max(n_trials, 1), trial_sharpe_std=a.trial_sharpe_std, time_col=_time_col(base["trades"]),
+                        risk_fraction=a.risk)
+    if base.get("data_gaps"):                                        # 研究数据有缺口（事件日历、资金费、日线）：不能判通过
+        res["data_gaps"] = base["data_gaps"]
+        if res["verdict"] == "通过":
+            res.update(verdict="证据不足")
+        res["missing"] = list(res["missing"]) + ["data_gaps"]
+    res.update(idea=a.idea, manifest={k: manifest.get(k) for k in ("required_stress", "fingerprint", "strategy", "stop_slip")},
+               runs={k: {kk: v.get(kk) for kk in ("status", "run_id", "error")} for k, v in states.items()},
+               note="上线判定：只基于组合回测的逐笔记录和策略声明的全部必需压力方案（v2.7）")
+    paths = _save(a.out_dir, f"verdict-{_stamp()}", res, report.verdict_md(res))
+    print(json.dumps({"verdict": res["verdict"], "failed": res["failed"], "missing": res["missing"],
+                      "required_stress": required, **paths}, ensure_ascii=False, default=_json_default))
     return 0
 
 
@@ -226,7 +314,8 @@ def cmd_matrix(a) -> int:
         jobs = [x for x in jobs if np.isfinite(x)]
         std = float(np.std(jobs, ddof=1)) if len(jobs) >= 2 else None
         label = "代理值：只有 1 个方案，用基准方案各任务（标的×年份）Sharpe 的标准差（模型推断）"
-    pooled = evaluate_trades(base, a.risk, n_trials, std, time_col=tc, holdout_start=a.holdout_start or None)
+    ho, registered = holdout_for(a)
+    pooled = evaluate_trades(base, a.risk, n_trials, std, time_col=tc, holdout_start=ho, holdout_registered=registered)
     res = {"base_variant": a.base, "trials_eval": t, "n_trials_used": n_trials, "trial_sharpe_std": std,
            "trial_sharpe_std_label": label, "pooled": pooled}
     pbo = t.get("pbo", {}).get("pbo")
@@ -240,11 +329,12 @@ def cmd_matrix(a) -> int:
             parts[f"stress:{v}"] = st["mean_R"] > 0                         # 成本压力下期望 R 仍为正（示例门槛）
         else:
             parts[f"stress:{v}"] = None
-    verdict, failed, missing = combine_verdicts(parts)
-    res.update(verdict=verdict, verdict_parts=parts, verdict_failed=failed, verdict_missing=missing,
-               note="矩阵是单币 × 单年的诊断；上线证据以组合回测（research portfolio）为准")
+    summary, failed, missing = combine_verdicts(parts)
+    res.update(verdict="诊断", diagnostic_summary=summary, verdict_parts=parts, verdict_failed=failed, verdict_missing=missing,
+               note="矩阵是单币 × 单年的诊断，不给上线判定（v2.7）；上线判定用 verdict：组合回测 + 策略声明的全部压力方案")
     paths = _save(a.out_dir, f"matrix-{_stamp()}", res, report.matrix_md(res))
-    print(json.dumps({"verdict": res["verdict"], "failed": failed, "missing": missing, "n_trials": n_trials,
+    print(json.dumps({"verdict": res["verdict"], "diagnostic_summary": summary, "failed": failed, "missing": missing,
+                      "n_trials": n_trials,
                       "pbo": pbo, **paths}, ensure_ascii=False, default=_json_default))
     return 0
 
@@ -264,6 +354,10 @@ def cmd_idea(a) -> int:
         print(json.dumps({"id": it.id, "evidence": len(it.evidence), "last": it.evidence[-1]}, ensure_ascii=False))
     elif a.op == "show":
         print(json.dumps(book.get(a.id).__dict__, ensure_ascii=False, indent=1, default=str))
+    elif a.op == "holdout":
+        it = book.set_holdout(a.id, a.start, a.by)
+        print(json.dumps({"id": it.id, "holdout_start": it.holdout_start, "registered_at": it.holdout_registered_at},
+                         ensure_ascii=False))
     elif a.op == "trials":
         print(json.dumps({"n_trials": book.n_trials()}))
     else:
@@ -297,7 +391,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--risk", type=float, default=0.005, help="单笔风险占权益比例（只用于路径类检验）")
     s.add_argument("--n-trials", type=int, default=1, help="为得到这条策略一共试过多少种方案")
     s.add_argument("--trial-sharpe-std", type=float, default=None)
-    s.add_argument("--holdout-start", default="", help="样本外段起点（UTC 日期）；不填则判“证据不足”")
+    s.add_argument("--holdout-start", default="", help="样本外段起点（只作参考；正式判定读 --idea 登记的值）")
+    s.add_argument("--idea", default="", help="想法 id：读取事先登记的样本外起点")
     s.add_argument("--ideas", default="research/ideas.jsonl")
     s.add_argument("--out-dir", default="research/lab")
     s.set_defaults(fn=cmd_stats)
@@ -307,7 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--base", default="base")
     m.add_argument("--stress", default="auto", help="压力测试方案（不计入尝试次数）；auto = 清单里跑过的压力方案，cost2x 必须有")
     m.add_argument("--risk", type=float, default=0.005)
-    m.add_argument("--holdout-start", default="", help="样本外段起点（UTC 日期）；不填则判“证据不足”")
+    m.add_argument("--holdout-start", default="", help="样本外段起点（只作参考；正式判定读 --idea 登记的值）")
+    m.add_argument("--idea", default="", help="想法 id：读取事先登记的样本外起点")
     m.add_argument("--ideas", default="research/ideas.jsonl")
     m.add_argument("--out-dir", default="research/lab")
     m.set_defaults(fn=cmd_matrix)
@@ -330,8 +426,18 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--max-age-min", type=float, default=30.0)
     n.set_defaults(fn=cmd_news)
 
+    v = sub.add_parser("verdict", help="上线判定：组合回测 + 策略声明的全部必需压力方案 + 事先登记的样本外段")
+    v.add_argument("--idea", required=True, help="想法 id（读取事先登记的样本外起点）")
+    v.add_argument("--results", default="research/results/portfolio")
+    v.add_argument("--current-fingerprint", default="", help="当前版本指纹；由模板的研究脚本传入，不一致的运行不采用")
+    v.add_argument("--risk", type=float, default=0.005)
+    v.add_argument("--trial-sharpe-std", type=float, default=None)
+    v.add_argument("--ideas", default="research/ideas.jsonl")
+    v.add_argument("--out-dir", default="research/lab")
+    v.set_defaults(fn=cmd_verdict)
+
     i = sub.add_parser("idea", help="想法登记簿")
-    i.add_argument("op", choices=["add", "list", "show", "move", "attach", "trials"])
+    i.add_argument("op", choices=["add", "list", "show", "move", "attach", "trials", "holdout"])
     i.add_argument("--file", default="research/ideas.jsonl")
     i.add_argument("--id")
     i.add_argument("--title")
@@ -349,6 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--kind")
     i.add_argument("--path")
     i.add_argument("--summary")
+    i.add_argument("--start", help="idea holdout：样本外段起点（UTC 日期），必须在回测之前登记")
     i.set_defaults(fn=cmd_idea)
     return ap
 

@@ -1,4 +1,4 @@
-# hyper-trader：Hyperliquid 永续自动交易框架（模板版 v2.6 · 策略留空）
+# hyper-trader：Hyperliquid 永续自动交易框架（模板版 v2.7 · 策略留空）
 
 这是一个**不含交易策略的框架**，交易规则由你写成插件接入。框架已经提供：
 
@@ -119,21 +119,23 @@ python3 scripts/backtest.py --coin SOL --okx-pages 60
 ```
 
 ```bash
-# ① 登记想法：假设、机制、证伪条件三项必填
+# ① 登记想法：假设、机制、证伪条件三项必填；回测之前登记样本外起点（只能登记一次）
 python3 scripts/run.py lab idea add --title "…" --hypothesis "…" --mechanism "…" --falsification "…" --source human
+python3 scripts/run.py lab idea holdout --id I-… --start 2025-06-01
 
 # ② 筛因子（5 个币，跨币种比较；只有 alive / reversed 且 FDR 显著才算候选）
 python3 scripts/run.py lab factors --tf 1d --horizon 3
 
 # ③ 写成插件后：组合回测（主证据）+ 研究矩阵（诊断；逐笔交易另存 research/results/trades/）
-python3 scripts/research_matrix.py portfolio --since 2022-01-01 --variant base
+python -m s03.events_calendar --out research/events_history.json --history   # 回放用的历史事件
+python3 scripts/research_matrix.py portfolio --all --since 2022-01-01            # base + 插件声明的压力方案
 python3 scripts/research_matrix.py plan --years 2023-2025 --impl A --variants base,stop_floor,cost2x,funding2x
 python3 scripts/research_matrix.py run --job BTC-2024-A-base          # 对 jobs.json 里每一格执行
 python3 scripts/research_matrix.py aggregate                          # 只汇总清单里、当前版本、成功的任务
 
-# ④ 统计检验：Bootstrap、按周 Bootstrap、分段一致性、Deflated Sharpe、PBO、样本外段、压力方案
-python3 scripts/run.py lab stats --trades research/results/portfolio/base.csv --holdout-start 2025-01-01
-python3 scripts/run.py lab matrix --holdout-start 2025-01-01
+# ④ 上线判定（唯一入口）：组合回测 + 插件声明的全部压力方案 + 登记的样本外段；矩阵只出诊断
+python3 scripts/research_matrix.py verdict --idea I-…
+python3 scripts/run.py lab matrix --idea I-…        # 诊断：PBO、各方案对比
 
 # ⑤ 批准（只能由你在终端执行）
 python -m fwresearch idea move --id I-… --to approved --reason "已审阅报告" --by human --approver <你的名字>

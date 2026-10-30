@@ -36,7 +36,9 @@ class OpenTrade:
 def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: Settings,
                platform_max_leverage: int, impl: str = "A", equity0: float = 10_000.0,
                funding: pd.Series | None = None, warmup_days: int = 200,
-               strategy: StrategyPlugin | None = None) -> tuple[pd.DataFrame, dict]:
+               strategy: StrategyPlugin | None = None, event_times: list | None = None) -> tuple[pd.DataFrame, dict]:
+    """event_times（v2.7）：历史事件时间（UTC）。与实盘一样，事件前 event_before_min 到事件后 event_after_min
+    之内不新开仓、撤掉已挂入场单（step 收到 blocked=True）。不传 = 回放里没有事件窗口（研究脚本会记为数据缺口）。"""
     s, c, r = settings.strategy, settings.cost, settings.risk
     strat = strategy or load_strategy(s)
     equity = equity0
@@ -55,12 +57,24 @@ def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: S
             ctx_cache[day] = strat.context(coin, hist) if len(hist) >= strat.warmup_days else None
         return ctx_cache[day]
 
+    evt = sorted(pd.Timestamp(x).tz_convert("UTC") if pd.Timestamp(x).tzinfo else pd.Timestamp(x).tz_localize("UTC")
+                for x in (event_times or []))
+    before, after = pd.Timedelta(minutes=s.event_before_min), pd.Timedelta(minutes=s.event_after_min)
+
+    def in_window(t) -> bool:
+        import bisect
+        k = bisect.bisect_left(evt, t - after)
+        return k < len(evt) and evt[k] - before <= t
+
     prev_day = None
     for i in range(1, len(b15)):
         t = b15.index[i]
         bar = b15.iloc[i]
         day = t.normalize()
         ctx = ctx_for(day)
+        blocked = bool(evt) and in_window(t)
+        if blocked and pos is None and pending is not None:
+            pending = None                                 # 与实盘一样：事件窗口内撤掉已挂入场单
 
         # ---- 持仓管理：资金费、止损/止盈、日线收盘规则
         if pos is not None:
@@ -127,7 +141,9 @@ def run_replay(coin: str, daily: pd.DataFrame, bars15: pd.DataFrame, settings: S
         # ---- 信号状态机（与实盘同一函数）
         if pos is None and ctx is not None:
             hist15 = b15.iloc[max(0, i - 200): i + 1]
-            state, intent = strat.step(state, ctx, hist15)
+            state, intent = strat.step(state, ctx, hist15, blocked=blocked)
+            if blocked and intent is not None and intent.kind != "cancel":
+                intent = None                              # 插件没处理 blocked 时，框架兜底：窗口内不挂单
             if intent is not None:
                 stop = check_stop(intent.trigger_px, intent.stop_px, s) if intent.kind != "cancel" else None
                 if intent.kind == "cancel" or stop is None:          # 止损不合规：与实盘一样不挂单

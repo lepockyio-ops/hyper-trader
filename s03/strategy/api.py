@@ -105,6 +105,9 @@ class StrategyPlugin:
     is_template = False          # 空白模板设为 True：框架会提示“未配置策略”，并且不会产生任何入场
     warmup_days = 60             # context() 需要的最少日线根数
     signal_timeframe = "15m"     # 目前框架按 15 分钟扫描；改动需同步 runtime.scan_interval_min
+    # 研究：上线判定必须通过的压力方案（随策略而定，v2.7）。可选 cost2x（手续费 ×2、滑点 ×3，止损也按此滑点）、
+    # funding2x（资金费估计 ×2）。改动要写进策略规格，并在 research_matrix.py plan / portfolio 之前定好。
+    research_stress: tuple = ("cost2x", "funding2x")
 
     def __init__(self, cfg):
         self.cfg = cfg

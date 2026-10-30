@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def trades(mean_r: float, n: int, seed: int = 1, sd: float = 1.0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     t = pd.date_range("2022-01-01", periods=n, freq="3D", tz="UTC")
-    return pd.DataFrame({"time": t, "R": rng.normal(mean_r, sd, n)})
+    return pd.DataFrame({"entry_time": t - pd.Timedelta(days=1), "time": t, "R": rng.normal(mean_r, sd, n)})
 
 
 def panel(n: int = 400, assets=("BTC", "ETH", "SOL", "BNB"), seed: int = 0) -> dict:
@@ -66,21 +66,23 @@ def test_permutation_keeps_mean_and_only_tests_path():
 
 def test_evaluate_trades_verdicts():
     assert stats.evaluate_trades(trades(0.4, 20))["verdict"] == "证据不足"
-    good = stats.evaluate_trades(trades(0.4, 300), holdout_start="2023-06-01")
+    good = stats.evaluate_trades(trades(0.4, 300), holdout_start="2023-06-01", holdout_registered=True)
     assert good["verdict"] == "通过", (good.get("failed"), good.get("undetermined"))
-    bad = stats.evaluate_trades(trades(-0.1, 300, seed=3), holdout_start="2023-06-01")
+    assert "sign_flip" not in good["checks"] and "sign_flip" in good["reference"]      # 只报告，不参与判定
+    bad = stats.evaluate_trades(trades(-0.1, 300, seed=3), holdout_start="2023-06-01", holdout_registered=True)
     assert bad["verdict"] == "不通过" and "bootstrap_mean_R" in bad["failed"]
 
 
 def test_gates_match_the_documented_g1_and_missing_checks_are_not_a_pass():
     """审查 P1：40 笔合成交易曾判“通过”（文档 G1 要求 ≥ 100 笔），DSR 未判定也被忽略。"""
-    r40 = stats.evaluate_trades(trades(0.6, 40), holdout_start="2022-03-01")
+    r40 = stats.evaluate_trades(trades(0.6, 40), holdout_start="2022-03-01", holdout_registered=True)
     assert r40["verdict"] == "证据不足" and "100" in r40["reason"]
     no_holdout = stats.evaluate_trades(trades(0.4, 300))
     assert no_holdout["verdict"] == "证据不足" and "holdout" in no_holdout["undetermined"]
-    no_std = stats.evaluate_trades(trades(0.4, 300), n_trials=5, holdout_start="2023-06-01")   # 试了 5 次却没给离散度
+    no_std = stats.evaluate_trades(trades(0.4, 300), n_trials=5, holdout_start="2023-06-01",
+                                   holdout_registered=True)                                     # 试了 5 次却没给离散度
     assert no_std["verdict"] == "证据不足" and "deflated_sharpe" in no_std["undetermined"]
-    short_ho = stats.evaluate_trades(trades(0.4, 300), holdout_start="2024-06-01")             # 样本外段笔数不足
+    short_ho = stats.evaluate_trades(trades(0.4, 300), holdout_start="2024-06-01", holdout_registered=True)  # 笔数不足
     assert short_ho["verdict"] == "证据不足" and "holdout" in short_ho["undetermined"]
     assert "segment_consistency" in no_holdout["checks"] and "block_bootstrap" in no_holdout["checks"]
 
@@ -340,7 +342,7 @@ def test_cli_end_to_end(tmp_path):
     r = run("matrix", "--holdout-start", "2023-01-01")
     assert r.returncode == 0, r.stderr
     m = json.loads(r.stdout)
-    assert m["n_trials"] == 2 and m["verdict"] in ("通过", "不通过", "证据不足")
+    assert m["n_trials"] == 2 and m["verdict"] == "诊断"                       # 矩阵只出诊断，不给上线判定
     assert "BNB-2023-base" in r.stderr and "指纹" in r.stderr                    # 版本不一致的任务被排除
     full = json.loads(Path(tmp_path, m["json"]).read_text("utf-8"))
     assert full["pooled"]["n_trades"] == 240 and "pbo" in full["verdict_parts"] and "stress:cost2x" in full["verdict_parts"]
@@ -632,3 +634,130 @@ def test_portfolio_overlay_enforces_positions_and_risk():
     assert res["max_drawdown_closed"] > 0 and abs(res["trades"]["pnl_portfolio"].iloc[0] - 50.0) < 1e-9
     tight = overlay(pd.DataFrame(rows), risk_per_trade=0.005, max_open_risk=0.01, max_positions=3)
     assert tight["position_cap"] == 2 and tight["rejected_by"].get("max_open_risk") == 3
+
+
+
+# ------------------------------------------------------------------ v2.7：样本外按入场时间且须事先登记；压力方案随策略；最终判定
+def test_holdout_by_entry_time_excludes_straddling_trades():
+    """审查 v2.6 P1-2：切分日之前入场、之后平仓的交易被算成样本外。"""
+    df = trades(0.5, 150, seed=0)
+    cut = "2022-11-01"
+    straddle = df["time"] >= cut
+    df.loc[straddle, "entry_time"] = pd.Timestamp("2022-10-01", tz="UTC")       # 全部在切分前入场
+    h = stats.holdout_check(df, cut, True, "time", stats.DEFAULT_GATES)
+    assert h["n"] == 0 and h["n_straddle_excluded"] == int(straddle.sum()) and h["pass"] is None
+    ok = stats.holdout_check(trades(0.5, 150, seed=0), cut, True, "time", stats.DEFAULT_GATES)
+    assert ok["n"] > 10 and ok["n_straddle_excluded"] <= 1 and ok["pass"] is True
+    assert stats.holdout_check(trades(0.5, 150), cut, False, "time", stats.DEFAULT_GATES)["pass"] is None   # 没登记
+    assert stats.holdout_check(trades(0.5, 150), "2023-03-10", True, "time", stats.DEFAULT_GATES)["pass"] is None  # 只占约 4%
+    assert "入场时间" in stats.holdout_check(trades(0.5, 150).drop(columns="entry_time"), cut, True, "time",
+                                              stats.DEFAULT_GATES)["error"]
+
+
+def test_idea_holdout_must_be_registered_before_backtests(tmp_path):
+    from fwresearch.ideas import IdeaBook
+
+    book = IdeaBook(tmp_path / "ideas.jsonl")
+    it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
+    book.set_holdout(it.id, "2025-01-01")
+    with pytest.raises(ValueError, match="不能修改"):
+        book.set_holdout(it.id, "2024-01-01")
+    late = book.add("第二个想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
+    book.move(late.id, "screening", "开始筛选")
+    book.move(late.id, "backtesting", "开始回测")
+    with pytest.raises(ValueError, match="回测之前"):
+        book.set_holdout(late.id, "2025-01-01")
+    assert book.get(it.id).holdout_start == "2025-01-01"
+
+
+@pytest.mark.parametrize("state,base_n,expect", [
+    (None, 100, None),                                                        # 没有这个任务
+    ({"status": "error", "trades": None}, 100, None),                         # 任务失败
+    ({"status": "ok", "trades": pd.DataFrame({"R": []})}, 100, False),        # 零交易
+    ({"status": "ok", "trades": trades(0.3, 50)}, 100, True),                 # 正常
+    ({"status": "ok", "trades": trades(-0.5, 50)}, 100, False),
+])
+def test_stress_states(state, base_n, expect):
+    assert stats.stress_check("delay1", state, base_n)["pass"] is expect
+
+
+def test_final_verdict_requires_every_declared_stress():
+    """审查 v2.6 P1-3：缺 delay1 仍得到“通过”。必需方案由策略声明，缺一个就不能通过。"""
+    base = trades(0.4, 300)
+    ok = {"cost2x": {"status": "ok", "trades": trades(0.3, 300, seed=2)}}
+    r = stats.final_verdict(base, ok, ["cost2x", "delay1"], holdout_start="2023-06-01", holdout_registered=True)
+    assert r["verdict"] == "证据不足" and "stress:delay1" in r["missing"]
+    r2 = stats.final_verdict(base, {**ok, "delay1": {"status": "ok", "trades": trades(0.2, 280, seed=3)}},
+                             ["cost2x", "delay1"], holdout_start="2023-06-01", holdout_registered=True)
+    assert r2["verdict"] == "通过", r2
+    r3 = stats.final_verdict(base, ok, ["cost2x"], holdout_start="2023-06-01", holdout_registered=True)
+    assert r3["verdict"] == "通过"                                            # 策略只声明 cost2x 时只要求它
+
+
+def test_stop_slip_stress_is_post_hoc_and_needs_columns():
+    df = pd.DataFrame({"R": [-1.0, 2.0], "exit_reason": ["stop_loss", "roi"], "notional": [5000.0, 5000.0],
+                       "risk": [50.0, 50.0]})
+    out = stats.stop_slip_trades(df, 0.002)
+    assert out["R"].tolist() == [-1.2, 2.0]
+    assert stats.stop_slip_trades(df.drop(columns="notional"), 0.002) is None
+
+
+def test_verdict_cli_refuses_stale_or_failed_runs(tmp_path):
+    """审查 v2.6 P1-4：组合回测失败后旧 CSV 仍可被统计使用。现在只读 latest.json 指向的成功运行，并核对指纹与哈希。"""
+    import hashlib
+
+    from fwresearch.ideas import IdeaBook
+
+    root = tmp_path / "portfolio"
+    book = IdeaBook(tmp_path / "ideas.jsonl")
+    it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
+    book.set_holdout(it.id, "2023-06-01")
+    (root).mkdir()
+    (root / "manifest.json").write_text(json.dumps({"required_stress": ["cost2x"], "fingerprint": "fp1"}))
+
+    def run(variant, df, status="ok", fp="fp1"):
+        d = root / variant / "run-1"
+        d.mkdir(parents=True, exist_ok=True)
+        df.to_csv(d / "trades.csv", index=False)
+        meta = {"status": status, "run_id": "1", "fingerprint": fp, "csv": "run-1/trades.csv",
+                "csv_sha256": hashlib.sha256((d / "trades.csv").read_bytes()).hexdigest()}
+        (root / variant / "latest.json").write_text(json.dumps(meta))
+
+    run("base", trades(0.4, 300))
+    run("cost2x", trades(0.3, 300, seed=2))
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    cli = lambda *a: subprocess.run([sys.executable, "-m", "fwresearch", "verdict", "--idea", it.id, "--results", str(root),  # noqa: E731
+                                     "--ideas", str(tmp_path / "ideas.jsonl"), "--out-dir", str(tmp_path / "lab"), *a],
+                                    capture_output=True, text=True, env=env, timeout=300)
+    r = cli("--current-fingerprint", "fp1")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["verdict"] == "通过"
+    run("cost2x", trades(0.3, 300, seed=2), status="error")                  # 新一次运行失败：旧结果不能再用
+    assert json.loads(cli("--current-fingerprint", "fp1").stdout)["verdict"] == "证据不足"
+    run("cost2x", trades(0.3, 300, seed=2), fp="old")                         # 结果属于旧版本
+    assert json.loads(cli("--current-fingerprint", "fp1").stdout)["verdict"] == "证据不足"
+
+
+def test_verdict_with_data_gaps_is_never_a_pass(tmp_path):
+    import hashlib
+
+    from fwresearch.ideas import IdeaBook
+
+    root = tmp_path / "portfolio"
+    book = IdeaBook(tmp_path / "ideas.jsonl")
+    it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
+    book.set_holdout(it.id, "2023-06-01")
+    root.mkdir()
+    (root / "manifest.json").write_text(json.dumps({"required_stress": [], "fingerprint": "fp1"}))
+    d = root / "base" / "run-1"
+    d.mkdir(parents=True)
+    trades(0.4, 300).to_csv(d / "trades.csv", index=False)
+    (root / "base" / "latest.json").write_text(json.dumps({
+        "status": "ok", "run_id": "1", "fingerprint": "fp1", "csv": "run-1/trades.csv",
+        "csv_sha256": hashlib.sha256((d / "trades.csv").read_bytes()).hexdigest(), "data_gaps": ["没有历史事件文件"]}))
+    r = subprocess.run([sys.executable, "-m", "fwresearch", "verdict", "--idea", it.id, "--results", str(root),
+                        "--ideas", str(tmp_path / "ideas.jsonl"), "--out-dir", str(tmp_path / "lab"),
+                        "--current-fingerprint", "fp1"], capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": str(ROOT)}, timeout=300)
+    out = json.loads(r.stdout)
+    assert out["verdict"] == "证据不足" and "data_gaps" in out["missing"]
