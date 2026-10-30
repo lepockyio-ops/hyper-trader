@@ -13,3 +13,15 @@ def test_metrics_from_journal():
     assert m["total"]["r_known"] == 3 and m["by_coin"]["SOL"]["profit_factor"] == round(160 / 98, 2)
     assert alert_counts(recs) == {"BTC:shock_1m": 1}
     assert "| SOL | 3 |" in to_markdown(m, "t")
+
+
+def test_total_streak_uses_account_close_order():
+    """审查 P2：合计先按币分组再拼接，真实 2 连亏被报告成 1。"""
+    from s03.report.metrics import compute
+
+    trs = [{"coin": "BTC", "close_time": "2026-01-01", "r": -1, "pnl": -1, "exit_reason": "sl"},
+           {"coin": "ETH", "close_time": "2026-01-02", "r": -1, "pnl": -1, "exit_reason": "sl"},
+           {"coin": "BTC", "close_time": "2026-01-03", "r": 1, "pnl": 1, "exit_reason": "tp"},
+           {"coin": "ETH", "close_time": "2026-01-04", "r": 1, "pnl": 1, "exit_reason": "tp"}]
+    m = compute(trs)
+    assert m["total"]["max_consecutive_losses"] == 2 and m["by_coin"]["BTC"]["max_consecutive_losses"] == 1

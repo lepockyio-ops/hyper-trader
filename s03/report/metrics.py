@@ -28,10 +28,12 @@ def compute(trades: list[dict]) -> dict:
             "exit_reasons": dict(Counter(t.get("exit_reason") or "unknown" for t in ts)),
         }
 
+    ordered = sorted(trades, key=lambda x: str(x.get("close_time")))
     by = defaultdict(list)
-    for t in sorted(trades, key=lambda x: str(x.get("close_time"))):
+    for t in ordered:
         by[t["coin"]].append(t)
-    return {"total": stats([t for v in by.values() for t in v]), "by_coin": {c: stats(v) for c, v in sorted(by.items())},
+    # 合计按全账户的平仓顺序计算（v2.5 及以前先按币分组再拼接，打乱了顺序，最长连亏会算少）
+    return {"total": stats(ordered), "by_coin": {c: stats(v) for c, v in sorted(by.items())},
             "evidence": "已核验事实（由日志或交易记录逐笔计算）；n < 30 时任何结论都属证据不足"}
 
 

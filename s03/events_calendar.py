@@ -244,6 +244,57 @@ def load_event_times(path: str | None, max_age_days: float = 3.0) -> list[str]:
     return times
 
 
+_check_cache: dict[str, tuple[float, dict]] = {}
+
+
+def calendar_check(path: str, now=None, max_age_days: float = 3.0) -> tuple[bool, str, list]:
+    """交易程序用：返回 (可用, 原因, 事件时间列表[pd.Timestamp UTC])。以下任一情况不可用：
+    文件不存在、损坏或时间格式非法、超过 max_age_days 未更新、所有来源失败、
+    某个失败来源没有沿用到上一版事件（count = 0）、覆盖区间（generated_at + horizon_days）已不含 now。
+    有来源失败但沿用了上一版事件时仍可用（原因里写明，由调用方告警）。"""
+    import pandas as pd
+
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+    if not path or not os.path.exists(path):
+        return False, "事件文件不存在", []
+    mt = os.path.getmtime(path)
+    c = _check_cache.get(path)
+    if c and c[0] == mt:
+        info = c[1]
+    else:
+        info = {"error": None, "times": []}
+        try:
+            data = json.loads(Path(path).read_text("utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("events"), list):
+                raise ValueError("缺少 events 列表")
+            ts = [pd.Timestamp(e["time_utc"]) for e in data["events"]]
+            info["times"] = [t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC") for t in ts]
+            info["ok"], info["sources"] = data.get("ok"), data.get("sources") or {}
+            g = data.get("generated_at")
+            info["generated_at"] = pd.Timestamp(g).tz_convert("UTC") if g and pd.Timestamp(g).tzinfo else (
+                pd.Timestamp(g).tz_localize("UTC") if g else None)
+            info["horizon_days"] = data.get("horizon_days")
+        except (OSError, ValueError, KeyError, TypeError) as e:           # pandas 的日期解析错误是 ValueError 子类
+            info = {"error": f"事件文件无效：{type(e).__name__}", "times": []}
+        _check_cache[path] = (mt, info)
+    if info["error"]:
+        return False, info["error"], []
+    if time.time() - mt > max_age_days * 86400:
+        return False, "事件文件过期", info["times"]
+    reason = ""
+    if info.get("ok") is not True:
+        srcs = info.get("sources") or {}
+        failed = [k for k, v in srcs.items() if not v.get("ok")]
+        if not srcs or len(failed) == len(srcs) or any(int(srcs[k].get("count") or 0) == 0 for k in failed):
+            return False, "事件来源失败：" + (",".join(failed) or "ok≠true"), info["times"]
+        reason = "部分来源失败，沿用上一版事件：" + ",".join(failed)
+    hz, gen = info.get("horizon_days"), info.get("generated_at")
+    if hz and gen is not None and now > gen + pd.Timedelta(days=float(hz) - 1):
+        return False, "事件覆盖区间不含现在", info["times"]
+    return True, reason, info["times"]
+
+
 def file_is_stale(path: str | None, max_age_days: float = 3.0) -> bool:
     return not path or not os.path.exists(path) or time.time() - os.path.getmtime(path) > max_age_days * 86400
 

@@ -1,4 +1,4 @@
-# hyper-trader：Hyperliquid 永续自动交易框架（模板版 v2.5 · 策略留空）
+# hyper-trader：Hyperliquid 永续自动交易框架（模板版 v2.6 · 策略留空）
 
 这是一个**不含交易策略的框架**，交易规则由你写成插件接入。框架已经提供：
 
@@ -37,7 +37,7 @@
 | 能做 | 不能做 / 不会做 |
 |---|---|
 | 把你的交易规则（策略插件）变成可回测、可影子运行、可实盘的程序 | 替你想出能赚钱的策略；自带的示例策略只用来验证框架能跑通 |
-| 对任何策略强制执行风控：止损距离 0.8–3%、单笔风险、总风险、强平距离 ≥ 3 倍止损、相关性合并、事件窗口、最长持有、熔断 | 让策略绕过这些风控 |
+| 对任何策略插件执行风控：止损距离 0.8–3%、单笔风险、总风险、强平距离 ≥ 3 倍止损、相关性合并、事件窗口（日历无效即拒绝新开仓）、最长持有、熔断。保证范围与已知限制见 `docs/FRAMEWORK.md`、`docs/REFERENCE.md` | 让策略绕过这些风控；保证回放与实盘成交一致 |
 | 研究前端：登记想法 → 筛因子（跨币种比较）→ 回测 → 统计检验（Deflated Sharpe、PBO 等） | 把统计检验“通过”当作收益保证 |
 | 由 OpenClaw agent 启停服务、巡检、做研究和复盘 | 让 agent 接触私钥、改参数、恢复交易或解锁主网 |
 
@@ -125,13 +125,15 @@ python3 scripts/run.py lab idea add --title "…" --hypothesis "…" --mechanism
 # ② 筛因子（5 个币，跨币种比较；只有 alive / reversed 且 FDR 显著才算候选）
 python3 scripts/run.py lab factors --tf 1d --horizon 3
 
-# ③ 写成插件后跑研究矩阵（每格一个子任务，逐笔交易另存 research/results/trades/）
-python3 scripts/research_matrix.py plan --years 2023-2025 --impl A --variants base,stop_floor,cost2x
+# ③ 写成插件后：组合回测（主证据）+ 研究矩阵（诊断；逐笔交易另存 research/results/trades/）
+python3 scripts/research_matrix.py portfolio --since 2022-01-01 --variant base
+python3 scripts/research_matrix.py plan --years 2023-2025 --impl A --variants base,stop_floor,cost2x,funding2x
 python3 scripts/research_matrix.py run --job BTC-2024-A-base          # 对 jobs.json 里每一格执行
-python3 scripts/research_matrix.py aggregate
+python3 scripts/research_matrix.py aggregate                          # 只汇总清单里、当前版本、成功的任务
 
-# ④ 统计检验：期望 R 区间、符号翻转、滚动分段、Deflated Sharpe、PBO、成本压力
-python3 scripts/run.py lab matrix
+# ④ 统计检验：Bootstrap、按周 Bootstrap、分段一致性、Deflated Sharpe、PBO、样本外段、压力方案
+python3 scripts/run.py lab stats --trades research/results/portfolio/base.csv --holdout-start 2025-01-01
+python3 scripts/run.py lab matrix --holdout-start 2025-01-01
 
 # ⑤ 批准（只能由你在终端执行）
 python -m fwresearch idea move --id I-… --to approved --reason "已审阅报告" --by human --approver <你的名字>
@@ -235,6 +237,6 @@ python3 scripts/run.py lab news blocks --guard-out /var/lib/s03-news/news_blocks
 | [`docs/STRATEGY_TEMPLATE.md`](docs/STRATEGY_TEMPLATE.md) | 策略规格填写模板（含验证门槛 G0–G9） |
 | [`docs/RESEARCH_LAB.md`](docs/RESEARCH_LAB.md) | 研究前端：流程、统计检验、因子口径、Vibe-Trading 安装验证记录 |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | 模块目录、机器学习、告警、密钥、测试网必测项、已知限制 |
-| [`docs/manual-hyperliquid.md`](docs/manual-hyperliquid.md) | 完整交易流程手册（第 1–19 节） |
+| [`docs/manual-hyperliquid.md`](docs/manual-hyperliquid.md) | 完整交易流程手册（第 1–19 节；v2.6 去掉了 S-03 残留） |
 | [`deploy/README.md`](deploy/README.md) | 服务器部署与 OpenClaw agent |
 | [`fwresearch/NOTICE.md`](fwresearch/NOTICE.md) | 移植代码的来源与许可（Vibe-Trading，MIT） |

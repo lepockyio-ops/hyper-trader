@@ -155,7 +155,7 @@ def cmd_stats(a) -> int:
     n_trials = max(a.n_trials, 1)
     if a.ideas and Path(a.ideas).exists():
         n_trials = max(n_trials, IdeaBook(a.ideas).n_trials())
-    res = evaluate_trades(df, a.risk, n_trials, a.trial_sharpe_std, time_col=tc)
+    res = evaluate_trades(df, a.risk, n_trials, a.trial_sharpe_std, time_col=tc, holdout_start=a.holdout_start or None)
     res["input"] = str(a.trades)
     paths = _save(a.out_dir, f"stats-{_stamp()}", res, report.stats_md(res))
     print(json.dumps({"verdict": res["verdict"], "n_trades": res["n_trades"], "failed": res.get("failed"), **paths},
@@ -164,21 +164,54 @@ def cmd_stats(a) -> int:
 
 
 # ---------------------------------------------------------------- matrix
+STRESS_VARIANTS = {"cost2x", "delay1", "funding2x"}             # 压力方案：不计入尝试次数，单独判定
+
+
 def load_matrix_trades(results_dir: str) -> pd.DataFrame:
-    files = sorted(Path(results_dir, "trades").glob("*.csv"))
-    frames = [pd.read_csv(f) for f in files if f.stat().st_size > 0]
-    frames = [f for f in frames if len(f)]
+    """只读当前任务清单（research/jobs.json）里、状态为 ok、代码指纹与清单一致的任务的逐笔文件。
+    v2.5 及以前读目录下全部 CSV：旧实验、失败重跑留下的旧文件会混进来。"""
+    rd = Path(results_dir)
+    jobs_file = rd.parent / "jobs.json"
+    if not jobs_file.exists():
+        raise SystemExit(f"找不到任务清单 {jobs_file}：先运行研究矩阵 plan")
+    manifest = json.loads(jobs_file.read_text("utf-8"))
+    jobs = manifest["jobs"] if isinstance(manifest, dict) else manifest
+    want = manifest.get("fingerprint") if isinstance(manifest, dict) else None
+    frames, skipped = [], []
+    for j in jobs:
+        meta, csv = rd / f"{j}.json", rd / "trades" / f"{j}.csv"
+        try:
+            m = json.loads(meta.read_text("utf-8"))
+        except (OSError, ValueError):
+            skipped.append(f"{j}：没有结果")
+            continue
+        if m.get("status") != "ok":
+            skipped.append(f"{j}：状态 {m.get('status')}")
+            continue
+        if want and m.get("fingerprint") != want:
+            skipped.append(f"{j}：代码 / 配置指纹与清单不一致（结果来自别的版本）")
+            continue
+        if csv.exists() and csv.stat().st_size > 0:
+            f = pd.read_csv(csv)
+            if len(f):
+                frames.append(f)
+    if skipped:
+        print(json.dumps({"skipped_jobs": skipped[:50], "n_skipped": len(skipped)}, ensure_ascii=False), file=sys.stderr)
     if not frames:
-        raise SystemExit(f"{results_dir}/trades/ 下没有逐笔文件：先用研究矩阵 run 跑出结果")
+        raise SystemExit(f"{results_dir}/trades/ 下没有当前清单里的有效逐笔文件：先用研究矩阵 run 跑出结果")
     return pd.concat(frames, ignore_index=True)
 
 
 def cmd_matrix(a) -> int:
-    from fwresearch.stats import bootstrap_mean_ci, evaluate_trades, evaluate_trials, sharpe_ratio
+    from fwresearch.stats import (DEFAULT_GATES, bootstrap_mean_ci, combine_verdicts, evaluate_trades, evaluate_trials,
+                                  sharpe_ratio)
 
     df = load_matrix_trades(a.results)
     tc = _time_col(df)
-    stress = set(a.stress.split(",")) if a.stress else set()
+    if a.stress == "auto":                                          # 清单里跑了哪些压力方案就用哪些；cost2x 必须有
+        stress = ({"cost2x"} | (set(df["variant"]) & STRESS_VARIANTS))
+    else:
+        stress = set(a.stress.split(",")) if a.stress else set()
     per = {v: g for v, g in df.groupby("variant") if v not in stress}
     t = evaluate_trials(per, tc)
     n_trials = t["n_trials"]
@@ -193,16 +226,26 @@ def cmd_matrix(a) -> int:
         jobs = [x for x in jobs if np.isfinite(x)]
         std = float(np.std(jobs, ddof=1)) if len(jobs) >= 2 else None
         label = "代理值：只有 1 个方案，用基准方案各任务（标的×年份）Sharpe 的标准差（模型推断）"
-    pooled = evaluate_trades(base, a.risk, n_trials, std, time_col=tc)
+    pooled = evaluate_trades(base, a.risk, n_trials, std, time_col=tc, holdout_start=a.holdout_start or None)
     res = {"base_variant": a.base, "trials_eval": t, "n_trials_used": n_trials, "trial_sharpe_std": std,
-           "trial_sharpe_std_label": label, "pooled": pooled, "verdict": pooled["verdict"]}
-    for v in stress:
+           "trial_sharpe_std_label": label, "pooled": pooled}
+    pbo = t.get("pbo", {}).get("pbo")
+    parts = {"pooled": pooled["verdict"], "pbo": (pbo < DEFAULT_GATES["pbo"]) if pbo is not None else None}
+    for v in stress or {"(未指定)"}:
         g = df[df["variant"] == v]
         if len(g) >= 5:
-            res["stress"] = {"variant": v, "n": int(len(g)), **bootstrap_mean_ci(g["R"])}
+            st = bootstrap_mean_ci(g["R"])
+            res.setdefault("stress_all", []).append({"variant": v, "n": int(len(g)), **st})
+            res["stress"] = res["stress_all"][0]
+            parts[f"stress:{v}"] = st["mean_R"] > 0                         # 成本压力下期望 R 仍为正（示例门槛）
+        else:
+            parts[f"stress:{v}"] = None
+    verdict, failed, missing = combine_verdicts(parts)
+    res.update(verdict=verdict, verdict_parts=parts, verdict_failed=failed, verdict_missing=missing,
+               note="矩阵是单币 × 单年的诊断；上线证据以组合回测（research portfolio）为准")
     paths = _save(a.out_dir, f"matrix-{_stamp()}", res, report.matrix_md(res))
-    print(json.dumps({"verdict": res["verdict"], "n_trials": n_trials, "pbo": t.get("pbo", {}).get("pbo"), **paths},
-                     ensure_ascii=False, default=_json_default))
+    print(json.dumps({"verdict": res["verdict"], "failed": failed, "missing": missing, "n_trials": n_trials,
+                      "pbo": pbo, **paths}, ensure_ascii=False, default=_json_default))
     return 0
 
 
@@ -254,6 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--risk", type=float, default=0.005, help="单笔风险占权益比例（只用于路径类检验）")
     s.add_argument("--n-trials", type=int, default=1, help="为得到这条策略一共试过多少种方案")
     s.add_argument("--trial-sharpe-std", type=float, default=None)
+    s.add_argument("--holdout-start", default="", help="样本外段起点（UTC 日期）；不填则判“证据不足”")
     s.add_argument("--ideas", default="research/ideas.jsonl")
     s.add_argument("--out-dir", default="research/lab")
     s.set_defaults(fn=cmd_stats)
@@ -261,8 +305,9 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("matrix", help="研究矩阵的多方案检验（DSR、PBO、成本压力）")
     m.add_argument("--results", default="research/results")
     m.add_argument("--base", default="base")
-    m.add_argument("--stress", default="cost2x", help="压力测试方案（不计入尝试次数）")
+    m.add_argument("--stress", default="auto", help="压力测试方案（不计入尝试次数）；auto = 清单里跑过的压力方案，cost2x 必须有")
     m.add_argument("--risk", type=float, default=0.005)
+    m.add_argument("--holdout-start", default="", help="样本外段起点（UTC 日期）；不填则判“证据不足”")
     m.add_argument("--ideas", default="research/ideas.jsonl")
     m.add_argument("--out-dir", default="research/lab")
     m.set_defaults(fn=cmd_matrix)

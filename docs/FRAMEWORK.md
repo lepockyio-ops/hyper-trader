@@ -32,6 +32,12 @@
 Deflated Sharpe、PBO）。找想法可选接入 Vibe-Trading，经 `mcp-guard` 白名单代理，只给研究 agent 用，交易类工具一律拒绝。
 入口：`python3 scripts/run.py lab …`；详见 `docs/RESEARCH_LAB.md`。
 
+## 事件日历（v2.6）
+
+`[strategy] event_file` 非空且 `event_file_required = true`（默认）时，以下任一情况都拒绝新开仓（`event_calendar_stale`）：
+文件不存在、损坏或时间格式非法、超过 3 天未更新、所有来源失败、某个失败来源没有沿用到上一版事件、覆盖区间不含现在；
+日历检查本身出错也按不可用处理。部分来源失败但沿用了上一版事件时放行。`event_file = ""` 表示明确不用事件日历（只在本地调试与回放时这样设）。
+
 ## 上线顺序（与策略无关）
 
 登记想法 → 筛因子 → 研究矩阵回测 → 统计检验（`lab matrix`）→ G0–G6 → 影子模式 → 测试网必测 5 项 → 测试网 live ≥ 4 周（G8）→ 你手动解锁主网、小额实盘（G9）。

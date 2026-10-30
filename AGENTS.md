@@ -30,8 +30,9 @@
 | 运行测试 | `pytest -q` |
 | 下载公开行情 | `python3 scripts/research_matrix.py fetch --coins BTC,ETH,SOL,BNB,HYPE --since 2023-01-01` |
 | 筛因子（5 个币，跨币种比较） | `python3 scripts/run.py lab factors --tf 1d` |
-| 研究矩阵 | `python3 scripts/research_matrix.py plan …` / `run --job …` / `aggregate` / `verify --job …` |
-| 统计检验 | `python3 scripts/run.py lab matrix` 或 `lab stats --trades <csv>` |
+| 组合回测（主证据） | `python3 scripts/research_matrix.py portfolio --since 2022-01-01` |
+| 研究矩阵（诊断） | `python3 scripts/research_matrix.py plan …` / `run --job …` / `aggregate` / `verify --job …` |
+| 统计检验 | `python3 scripts/run.py lab matrix --holdout-start <日期>` 或 `lab stats --trades <csv> --holdout-start <日期>` |
 | 登记 / 推进想法（不含 approved） | `python3 scripts/run.py lab idea add|list|show|move|attach|trials …` |
 | 只读筛选当前行情 | `python3 scripts/screen_now.py` |
 | 查看新闻事件守卫 | `python3 scripts/run.py lab news blocks --guard-out /var/lib/s03-news/news_blocks.json` |

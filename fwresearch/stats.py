@@ -29,8 +29,11 @@ GAUSSIAN_KURTOSIS = 3.0          # 非超额峰度：正态分布为 3，不是 
 MIN_OBSERVATIONS = 30            # PSR / DSR 至少需要的样本数（上游同值）
 
 # 判定阈值：全部为“示例值”，未经数据验证。
-DEFAULT_GATES: dict[str, float] = {
-    "min_trades": 30,            # 少于此数 → 证据不足（与手册 G1 一致）
+DEFAULT_GATES: dict[str, Any] = {
+    "min_trades": 30,            # 少于此数 → 证据不足，不做检验
+    "pass_min_trades": 100,      # 判“通过”至少需要的笔数（G1：≥ 100 笔；30–99 笔最多判“证据不足”）
+    "holdout_min_trades": 10,    # 样本外段至少的笔数
+    "block_freq": "W",           # 按时间块（周）汇总 R 再做 Bootstrap：同时持仓、行情聚集时比逐笔 Bootstrap 保守
     "confidence": 0.95,          # 置信水平
     "boot_lower_R": 0.0,         # 期望 R 的 Bootstrap 区间下限必须 > 此值
     "sign_flip_p": 0.05,         # 符号翻转检验 p 值必须 < 此值
@@ -152,7 +155,9 @@ def bootstrap_sharpe_ci(returns, n_boot: int = 2000, confidence: float = 0.95, p
 
 
 def walk_forward(trades: pd.DataFrame, n_windows: int = 5, time_col: str = "time") -> dict[str, Any]:
-    """按时间切成不重叠窗口，看每段的期望 R 是否一致为正（上游 walk_forward_analysis，改为逐笔 R 口径）。"""
+    """分段一致性：把同一批结果按时间切成不重叠窗口，看每段的期望 R 是否一致为正。
+    名字沿用上游 walk_forward_analysis，但它**不是**“训练 → 冻结参数 → 样本外测试”的滚动验证；
+    样本外检验见 evaluate_trades 的 holdout_start（报告里叫“分段一致性”）。"""
     if n_windows < 1:
         return {"error": "n_windows 必须 ≥ 1"}
     df = trades.dropna(subset=["R"]).sort_values(time_col)
@@ -175,6 +180,26 @@ def walk_forward(trades: pd.DataFrame, n_windows: int = 5, time_col: str = "time
             "consistency_rate": round(good / len(used), 4) if used else 0.0,
             "expectancy_mean": round(float(np.mean(exps)), 4) if exps else None,
             "expectancy_std": round(float(np.std(exps)), 4) if exps else None}
+
+
+def block_bootstrap_mean_ci(trades: pd.DataFrame, time_col: str = "time", freq: str = "W", n_boot: int = 5000,
+                            confidence: float = 0.95, seed: int = 42) -> dict[str, Any]:
+    """按时间块汇总 R（默认每周，按平仓时间；没有交易的周记 0），再对“块”做 Bootstrap。
+    多币同时持仓、行情阶段聚集时逐笔并不独立，逐笔 Bootstrap 的区间会偏窄；按块抽样更保守（本框架新增）。"""
+    df = trades.dropna(subset=["R"])
+    if len(df) < 5 or time_col not in df:
+        return {"error": "至少需要 5 笔交易和时间列"}
+    t = pd.to_datetime(df[time_col], utc=True)
+    per = pd.Series(df["R"].to_numpy(float), index=t).resample(freq).sum()
+    v = per.to_numpy(float)
+    if v.size < 5:
+        return {"error": f"按 {freq} 汇总后只有 {v.size} 个时间块"}
+    rng = np.random.default_rng(seed)
+    means = rng.choice(v, size=(n_boot, v.size), replace=True).mean(axis=1)
+    a = (1 - confidence) / 2
+    return {"freq": freq, "blocks": int(v.size), "mean_R_per_block": round(float(v.mean()), 4),
+            "ci_lower": round(float(np.quantile(means, a)), 4), "ci_upper": round(float(np.quantile(means, 1 - a)), 4),
+            "confidence": confidence, "n_boot": n_boot}
 
 
 # ======================================================================== 3. 是不是搜出来的（移植自 multipletesting.py）
@@ -324,9 +349,13 @@ def _safe_sharpe(x, ddof):
 # ======================================================================== 汇总判定
 def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials: int = 1,
                     trial_sharpe_std: float | None = None, gates: dict | None = None, time_col: str = "time",
-                    seed: int = 42) -> dict[str, Any]:
-    """对一组逐笔交易（列 R 与 time_col）跑全部检验，按 gates 给出“通过 / 不通过 / 证据不足”。
-    n_trials：为了得到这条策略总共试过多少种方案（含想法登记簿里回测过的想法）。"""
+                    seed: int = 42, holdout_start: str | None = None) -> dict[str, Any]:
+    """对一组逐笔交易（列 R 与 time_col）跑全部检验，给出“通过 / 不通过 / 证据不足”。
+    判定（v2.6 起）：任一必需检验不通过 → 不通过；任一必需检验无法判定（缺样本外段、缺 DSR 所需数据等）→ 证据不足；
+    笔数 < pass_min_trades（100）→ 证据不足；其余 → 通过。
+    必需检验：Bootstrap 期望 R、符号翻转、按时间块 Bootstrap、分段一致性、Deflated Sharpe、样本外段。
+    n_trials：为了得到这条策略总共试过多少种方案（含想法登记簿里回测过的想法）；只试过 1 种时 DSR 退化为 PSR。
+    holdout_start：样本外段起点（UTC 日期）；之前的数据用于选参数，之后的数据只看一次。"""
     g = {**DEFAULT_GATES, **(gates or {})}
     r = _clean(trades["R"]) if "R" in trades else np.array([])
     out: dict[str, Any] = {"n_trades": int(r.size), "gates": g, "gate_label": "示例值（未经数据验证）"}
@@ -340,12 +369,13 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
     bm = bootstrap_mean_ci(r, confidence=g["confidence"], seed=seed)
     checks["bootstrap_mean_R"] = {"pass": bm["ci_lower"] > g["boot_lower_R"], **bm}
     sf = sign_flip_test(r, seed=seed)
-    checks["sign_flip"] = {"pass": sf["p_value"] < g["sign_flip_p"], **sf}
+    checks["sign_flip"] = {"pass": sf["p_value"] < g["sign_flip_p"], **sf,
+                           "note": "假设零假设下 R 关于 0 对称；止损截断、盈利长尾时只作参考，以 Bootstrap 为主"}
+    bb = block_bootstrap_mean_ci(trades, time_col, g["block_freq"], confidence=g["confidence"], seed=seed) \
+        if time_col in trades else {"error": f"缺少时间列 {time_col}"}
+    checks["block_bootstrap"] = {"pass": (bb["ci_lower"] > 0) if "error" not in bb else None, **bb}
     wf = walk_forward(trades, 5, time_col) if time_col in trades else {"error": f"缺少时间列 {time_col}"}
-    if "error" not in wf:
-        checks["walk_forward"] = {"pass": wf["consistency_rate"] >= g["wf_consistency"], **wf}
-    else:
-        checks["walk_forward"] = {"pass": None, **wf}
+    checks["segment_consistency"] = {"pass": (wf["consistency_rate"] >= g["wf_consistency"]) if "error" not in wf else None, **wf}
 
     sr = sharpe_ratio(r)
     sk, ku = moments(r)
@@ -361,17 +391,46 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
                                          **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in asdict(d).items()}}
         except ValueError as e:
             checks["deflated_sharpe"] = {"pass": None, "error": str(e)}
+    elif n_trials < 2 and "psr_vs_0" in info:
+        checks["deflated_sharpe"] = {"pass": info["psr_vs_0"] > g["dsr"], "deflated_sharpe_ratio": info["psr_vs_0"],
+                                     "n_trials": 1, "note": "只登记了 1 种方案：DSR 退化为 PSR（请如实登记尝试次数）"}
     else:
-        checks["deflated_sharpe"] = {"pass": None, "note": "只试过 1 种方案或未提供各方案 Sharpe 离散度：不做折扣（请如实登记尝试次数）"}
+        checks["deflated_sharpe"] = {"pass": None, "note": "尝试 ≥ 2 次但缺各方案 Sharpe 离散度：无法折扣"}
+
+    if holdout_start and time_col in trades:
+        t = pd.to_datetime(trades[time_col], utc=True)
+        ho = _clean(trades.loc[(t >= pd.Timestamp(holdout_start, tz="UTC")).values, "R"])
+        if ho.size < g["holdout_min_trades"]:
+            checks["holdout"] = {"pass": None, "n": int(ho.size), "start": holdout_start,
+                                 "error": f"样本外段只有 {ho.size} 笔 < {int(g['holdout_min_trades'])} 笔"}
+        else:
+            checks["holdout"] = {"pass": float(ho.mean()) > 0, "n": int(ho.size), "start": holdout_start,
+                                 "mean_R": round(float(ho.mean()), 4)}
+    else:
+        checks["holdout"] = {"pass": None, "note": "未指定样本外段（--holdout-start）"}
 
     out["sharpe"] = info
     out["bootstrap_sharpe"] = bootstrap_sharpe_ci(r, confidence=g["confidence"], seed=seed)
     out["monte_carlo_path"] = monte_carlo_permutation(r, risk_fraction, seed=seed)
     out["checks"] = checks
-    judged = [c["pass"] for c in checks.values() if c.get("pass") is not None]
-    out["verdict"] = "通过" if judged and all(judged) else "不通过"
     out["failed"] = [k for k, c in checks.items() if c.get("pass") is False]
+    out["undetermined"] = [k for k, c in checks.items() if c.get("pass") is None]
+    if out["failed"]:
+        out["verdict"] = "不通过"
+    elif out["undetermined"]:
+        out.update(verdict="证据不足", reason="无法判定：" + "、".join(out["undetermined"]))
+    elif r.size < g["pass_min_trades"]:
+        out.update(verdict="证据不足", reason=f"交易 {r.size} 笔 < {int(g['pass_min_trades'])} 笔（G1）")
+    else:
+        out["verdict"] = "通过"
     return out
+
+
+def combine_verdicts(parts: dict[str, str | bool | None]) -> tuple[str, list[str], list[str]]:
+    """多个判定合成一个：任一“不通过”/False → 不通过；任一“证据不足”/None → 证据不足；否则通过。"""
+    failed = [k for k, v in parts.items() if v is False or v == "不通过"]
+    missing = [k for k, v in parts.items() if v is None or v == "证据不足"]
+    return ("不通过" if failed else "证据不足" if missing else "通过"), failed, missing
 
 
 def evaluate_trials(per_trial: dict[str, pd.DataFrame], time_col: str = "time", freq: str = "MS",

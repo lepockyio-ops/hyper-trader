@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from s03 import events_calendar as ec
 
@@ -84,3 +85,51 @@ def test_guard_reads_event_file_and_blocks_when_stale(tmp_path):
     assert g.event_calendar_stale()
     g2 = RiskGuard(RiskConfig(), StrategyConfig(event_file=str(tmp_path / "missing.json")), str(tmp_path / "KILL"))
     assert g2.event_calendar_stale()
+
+
+# ------------------------------------------------------------------ v2.6：日历无效一律拒绝新开仓（审查 P0）
+def _cal(tmp_path, name="e.json", ok=True, events=None, sources=None, generated=None, horizon=35):
+    import json
+    from datetime import datetime, timezone
+
+    f = tmp_path / name
+    f.write_text(json.dumps({"generated_at": (generated or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             "horizon_days": horizon, "ok": ok, "events": events if events is not None else [],
+                             "sources": sources if sources is not None else {"fed": {"ok": ok, "count": 1}}}), "utf-8")
+    return str(f)
+
+
+@pytest.mark.parametrize("case", ["ok_false_empty", "all_failed", "failed_no_fallback", "bad_time", "bad_json",
+                                  "missing", "stale", "horizon"])
+def test_guard_rejects_invalid_calendar(tmp_path, case):
+    from datetime import datetime, timedelta, timezone
+
+    from s03.config import RiskConfig, StrategyConfig
+    from s03.risk.guard import RiskGuard
+
+    now = pd.Timestamp.now(tz="UTC")
+    f = {"ok_false_empty": lambda: _cal(tmp_path, ok=False, sources={"fed": {"ok": False, "count": 0}}),
+         "all_failed": lambda: _cal(tmp_path, ok=False, sources={"fed": {"ok": False, "count": 3}}),
+         "failed_no_fallback": lambda: _cal(tmp_path, ok=False, sources={"fed": {"ok": True, "count": 3},
+                                                                          "bls": {"ok": False, "count": 0}}),
+         "bad_time": lambda: _cal(tmp_path, events=[{"time_utc": "not-a-time"}]),
+         "bad_json": lambda: (tmp_path / "b.json").write_text("{broken", "utf-8") and str(tmp_path / "b.json"),
+         "missing": lambda: str(tmp_path / "nope.json"),
+         "stale": lambda: _cal(tmp_path),
+         "horizon": lambda: _cal(tmp_path, generated=datetime.now(timezone.utc) - timedelta(days=40)),
+         }[case]()
+    if case == "stale":
+        os.utime(f, (0, 0))
+    g = RiskGuard(RiskConfig(), StrategyConfig(event_file=f), str(tmp_path / "KILL"))
+    ok, reason, _ = g.calendar(now)
+    assert not ok and reason and g.event_calendar_stale(now)
+
+
+def test_guard_partial_failure_with_fallback_is_usable(tmp_path):
+    from s03.config import RiskConfig, StrategyConfig
+    from s03.risk.guard import RiskGuard
+
+    f = _cal(tmp_path, ok=False, sources={"fed": {"ok": True, "count": 8}, "bls": {"ok": False, "count": 5}})
+    g = RiskGuard(RiskConfig(), StrategyConfig(event_file=f), str(tmp_path / "KILL"))
+    ok, reason, _ = g.calendar(pd.Timestamp.now(tz="UTC"))
+    assert ok and "bls" in reason

@@ -89,27 +89,45 @@ class RiskGuard:
                 v.fail("consecutive_loss_pause")
         if acct.rate_budget_left is not None and acct.rate_budget_left < r.min_rate_budget:
             v.fail("rate_budget_low")
-        if self.in_event_window(now):
-            v.fail("event_window")
-        if self.event_calendar_stale():
+        try:
+            cal_ok, cal_reason, times = self.calendar(now)
+        except Exception as e:                                  # 日历检查本身出错：按不可用处理
+            cal_ok, cal_reason, times = False, f"事件日历检查出错：{type(e).__name__}", []
+        if not cal_ok:
             v.fail("event_calendar_stale")
+        elif self.in_event_window(now, times):
+            v.fail("event_window")
         return v
 
-    def event_calendar_stale(self) -> bool:
-        from s03.events_calendar import file_is_stale
+    def calendar(self, now: pd.Timestamp | None = None) -> tuple[bool, str, list]:
+        """(可用, 原因, 事件时间)。event_file 为空 = 明确不用事件日历（本地调试、回放），只用 event_times_utc。
+        设置了 event_file 且 event_file_required：文件缺失、损坏、过期、来源失败、覆盖不足都判为不可用（拒绝新开仓）。"""
+        from s03.events_calendar import calendar_check
 
         st = self.strat
-        return bool(st.event_file) and st.event_file_required and file_is_stale(st.event_file, st.event_file_max_age_days)
+        times = [(t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC"))
+                 for t in (pd.Timestamp(x) for x in st.event_times_utc)]
+        if not st.event_file:
+            return True, "", times
+        ok, reason, ftimes = calendar_check(st.event_file, now, st.event_file_max_age_days)
+        if not ok and st.event_file_required:
+            return False, reason, times
+        return True, reason, times + ftimes
 
-    def event_times(self) -> list[str]:
-        from s03.events_calendar import load_event_times
+    def event_calendar_stale(self, now: pd.Timestamp | None = None) -> bool:
+        """兼容旧名：True = 日历不可用（会拒绝新开仓）。"""
+        try:
+            return not self.calendar(now)[0]
+        except Exception:
+            return True
 
-        return list(self.strat.event_times_utc) + load_event_times(self.strat.event_file or None)
-
-    def in_event_window(self, now: pd.Timestamp) -> bool:
-        for s in self.event_times():
-            t = pd.Timestamp(s)
-            t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    def in_event_window(self, now: pd.Timestamp, times: list | None = None) -> bool:
+        if times is None:
+            try:
+                times = self.calendar(now)[2]
+            except Exception:
+                return True                                     # 读不出事件时间：按处于窗口内处理（不开仓）
+        for t in times:
             if t - pd.Timedelta(minutes=self.strat.event_before_min) <= now <= t + pd.Timedelta(
                 minutes=self.strat.event_after_min
             ):

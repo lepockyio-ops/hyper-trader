@@ -66,17 +66,39 @@ def test_permutation_keeps_mean_and_only_tests_path():
 
 def test_evaluate_trades_verdicts():
     assert stats.evaluate_trades(trades(0.4, 20))["verdict"] == "证据不足"
-    good = stats.evaluate_trades(trades(0.4, 300))
-    assert good["verdict"] == "通过", good.get("failed")
-    bad = stats.evaluate_trades(trades(-0.1, 300, seed=3))
+    good = stats.evaluate_trades(trades(0.4, 300), holdout_start="2023-06-01")
+    assert good["verdict"] == "通过", (good.get("failed"), good.get("undetermined"))
+    bad = stats.evaluate_trades(trades(-0.1, 300, seed=3), holdout_start="2023-06-01")
     assert bad["verdict"] == "不通过" and "bootstrap_mean_R" in bad["failed"]
+
+
+def test_gates_match_the_documented_g1_and_missing_checks_are_not_a_pass():
+    """审查 P1：40 笔合成交易曾判“通过”（文档 G1 要求 ≥ 100 笔），DSR 未判定也被忽略。"""
+    r40 = stats.evaluate_trades(trades(0.6, 40), holdout_start="2022-03-01")
+    assert r40["verdict"] == "证据不足" and "100" in r40["reason"]
+    no_holdout = stats.evaluate_trades(trades(0.4, 300))
+    assert no_holdout["verdict"] == "证据不足" and "holdout" in no_holdout["undetermined"]
+    no_std = stats.evaluate_trades(trades(0.4, 300), n_trials=5, holdout_start="2023-06-01")   # 试了 5 次却没给离散度
+    assert no_std["verdict"] == "证据不足" and "deflated_sharpe" in no_std["undetermined"]
+    short_ho = stats.evaluate_trades(trades(0.4, 300), holdout_start="2024-06-01")             # 样本外段笔数不足
+    assert short_ho["verdict"] == "证据不足" and "holdout" in short_ho["undetermined"]
+    assert "segment_consistency" in no_holdout["checks"] and "block_bootstrap" in no_holdout["checks"]
+
+
+def test_combine_verdicts_and_block_bootstrap():
+    assert stats.combine_verdicts({"a": "通过", "pbo": True})[0] == "通过"
+    assert stats.combine_verdicts({"a": "通过", "pbo": False})[0] == "不通过"
+    assert stats.combine_verdicts({"a": "通过", "stress": None})[0] == "证据不足"
+    assert stats.combine_verdicts({"a": "证据不足", "pbo": False})[0] == "不通过"
+    b = stats.block_bootstrap_mean_ci(trades(0.3, 200), freq="W")
+    assert b["blocks"] > 80 and b["ci_lower"] < b["mean_R_per_block"] < b["ci_upper"]
 
 
 def test_deflation_bites_with_many_trials():
     df = trades(0.12, 300, seed=11)
     one = stats.evaluate_trades(df, n_trials=1)
     many = stats.evaluate_trades(df, n_trials=200, trial_sharpe_std=0.08)
-    assert one["checks"]["deflated_sharpe"]["pass"] is None
+    assert one["checks"]["deflated_sharpe"]["n_trials"] == 1 and "PSR" in one["checks"]["deflated_sharpe"]["note"]
     d = many["checks"]["deflated_sharpe"]
     assert d["expected_maximum_sharpe"] > 0 and d["deflated_sharpe_ratio"] < many["sharpe"]["psr_vs_0"]
 
@@ -300,15 +322,28 @@ def test_cli_end_to_end(tmp_path):
 
     res = tmp_path / "research" / "results" / "trades"
     res.mkdir(parents=True)
+    jobs = []
     for v, mu in (("base", 0.3), ("stop_floor", 0.2), ("cost2x", 0.1)):
         for coin in ("BTC", "SOL"):
             df = trades(mu, 120, seed=hash((v, coin)) % 1000)
-            df["job"], df["variant"], df["coin"] = f"{coin}-2023-{v}", v, coin
-            df.to_csv(res / f"{coin}-2023-{v}.csv", index=False)
-    r = run("matrix")
+            jid = f"{coin}-2023-{v}"
+            df["job"], df["variant"], df["coin"] = jid, v, coin
+            df.to_csv(res / f"{jid}.csv", index=False)
+            (res.parent / f"{jid}.json").write_text(json.dumps({"job": jid, "status": "ok", "fingerprint": "fp1"}))
+            jobs.append(jid)
+    stale = trades(5.0, 50)                                          # 旧实验的残留文件：不在清单里，不能被读进来
+    stale["job"], stale["variant"], stale["coin"] = "ETH-2021-base", "base", "ETH"
+    stale.to_csv(res / "ETH-2021-base.csv", index=False)
+    (tmp_path / "research" / "jobs.json").write_text(json.dumps({"jobs": jobs + ["BNB-2023-base"], "fingerprint": "fp1"}))
+    (res.parent / "BNB-2023-base.json").write_text(json.dumps({"job": "BNB-2023-base", "status": "ok", "fingerprint": "old"}))
+    trades(9.0, 50).assign(job="BNB-2023-base", variant="base", coin="BNB").to_csv(res / "BNB-2023-base.csv", index=False)
+    r = run("matrix", "--holdout-start", "2023-01-01")
     assert r.returncode == 0, r.stderr
     m = json.loads(r.stdout)
-    assert m["n_trials"] == 2 and m["verdict"] in ("通过", "不通过")
+    assert m["n_trials"] == 2 and m["verdict"] in ("通过", "不通过", "证据不足")
+    assert "BNB-2023-base" in r.stderr and "指纹" in r.stderr                    # 版本不一致的任务被排除
+    full = json.loads(Path(tmp_path, m["json"]).read_text("utf-8"))
+    assert full["pooled"]["n_trades"] == 240 and "pbo" in full["verdict_parts"] and "stress:cost2x" in full["verdict_parts"]
     r = run("stats", "--trades", str(res / "BTC-2023-base.csv"))
     assert r.returncode == 0 and json.loads(r.stdout)["n_trades"] == 120
     r = run("idea", "add", "--title", "测试想法", "--hypothesis", "某因子预测收益", "--mechanism", "资金拥挤",
@@ -582,3 +617,18 @@ def test_blockbeats_allow_file_is_read_only_tools():
         if repo_file.exists():
             allow = load_allow(str(repo_file))
             assert len(allow) == 18 and all(t.startswith(("get_", "search_")) for t in allow)
+
+
+# ------------------------------------------------------------------ 组合约束（交易层近似）
+def test_portfolio_overlay_enforces_positions_and_risk():
+    from fwresearch.portfolio import overlay
+
+    t0 = pd.Timestamp("2024-01-01", tz="UTC")
+    rows = [{"coin": c, "entry_time": t0 + pd.Timedelta(hours=i), "time": t0 + pd.Timedelta(days=2), "R": 1.0}
+            for i, c in enumerate(["BTC", "ETH", "SOL", "BNB", "HYPE"])]
+    rows.append({"coin": "BTC", "entry_time": t0 + pd.Timedelta(days=3), "time": t0 + pd.Timedelta(days=4), "R": -1.0})
+    res = overlay(pd.DataFrame(rows), risk_per_trade=0.005, max_open_risk=0.015, max_positions=3)
+    assert res["n_taken"] == 4 and res["n_rejected"] == 2 and res["position_cap"] == 3
+    assert res["max_drawdown_closed"] > 0 and abs(res["trades"]["pnl_portfolio"].iloc[0] - 50.0) < 1e-9
+    tight = overlay(pd.DataFrame(rows), risk_per_trade=0.005, max_open_risk=0.01, max_positions=3)
+    assert tight["position_cap"] == 2 and tight["rejected_by"].get("max_open_risk") == 3

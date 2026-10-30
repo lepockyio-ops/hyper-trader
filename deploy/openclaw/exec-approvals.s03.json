@@ -60,7 +60,7 @@
         },
         {
           "pattern": "python3",
-          "argPattern": "^scripts/research_matrix\\.py (fetch|plan|run|verify|aggregate)( [A-Za-z0-9_.=:/,-]+)*$"
+          "argPattern": "^scripts/research_matrix\\.py (fetch|plan|run|verify|aggregate|portfolio)( [A-Za-z0-9_.=:/,-]+)*$"
         },
         {
           "pattern": "python3",

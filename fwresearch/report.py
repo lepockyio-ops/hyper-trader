@@ -1,6 +1,8 @@
 """把检验结果写成 Markdown（给人看，也给 OpenClaw 复盘 / 研究 agent 读）。数字全部来自程序输出。"""
 from __future__ import annotations
 
+import json
+
 from typing import Any
 
 import pandas as pd
@@ -57,7 +59,9 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
         lines.append(f"- 未通过：{', '.join(res['failed'])}")
     ch = res.get("checks", {})
     names = {"bootstrap_mean_R": "期望 R 的 Bootstrap 区间下限 > 0", "sign_flip": "符号翻转检验 p < 阈值",
-             "walk_forward": "滚动分段中期望 R > 0 的窗口占比", "deflated_sharpe": "Deflated Sharpe（按尝试次数折扣）"}
+             "segment_consistency": "分段一致性：期望 R > 0 的时间段占比（同一批结果切段，不是训练-测试验证）",
+             "block_bootstrap": "按周汇总 R 的 Bootstrap 区间下限 > 0", "holdout": "样本外段期望 R > 0",
+             "deflated_sharpe": "Deflated Sharpe（按尝试次数折扣）"}
     if ch:
         lines += ["", "| 检验 | 结果 | 关键数字 |", "| --- | --- | --- |"]
         for k, c in ch.items():
@@ -66,9 +70,14 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
                 num = f"期望 R {c['mean_R']}，{int(c['confidence'] * 100)}% 区间 [{c['ci_lower']}, {c['ci_upper']}]"
             elif k == "sign_flip":
                 num = f"p = {c['p_value']}"
-            elif k == "walk_forward":
+            elif k == "segment_consistency":
                 num = (f"{c.get('profitable_windows')}/{c.get('windows_with_trades')} 个窗口为正"
                        if "error" not in c else c["error"])
+            elif k == "block_bootstrap":
+                num = (f"{c['blocks']} 个时间块，区间 [{c['ci_lower']}, {c['ci_upper']}]" if "error" not in c else c["error"])
+            elif k == "holdout":
+                num = (f"自 {c['start']} 起 {c['n']} 笔，期望 R {c['mean_R']}" if "mean_R" in c
+                       else c.get("error") or c.get("note", ""))
             else:
                 num = (f"DSR = {c.get('deflated_sharpe_ratio')}，尝试 {c.get('n_trials')} 次，运气门槛 Sharpe {c.get('expected_maximum_sharpe')}"
                        if "deflated_sharpe_ratio" in c else c.get("note") or c.get("error", ""))
@@ -81,8 +90,8 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
         m = res["monte_carlo_path"]
         lines += [f"Monte Carlo 排列（只检验回撤路径，不检验优势）：实际最大回撤 {m['actual_max_dd']}，"
                   f"随机顺序的中位数 {m['simulated_max_dd_median']}、最差 5% {m['simulated_max_dd_p5']}。"]
-    if res.get("checks", {}).get("walk_forward", {}).get("windows"):
-        lines += ["", "## 滚动分段", "", _md_table(res["checks"]["walk_forward"]["windows"],
+    if res.get("checks", {}).get("segment_consistency", {}).get("windows"):
+        lines += ["", "## 分段一致性", "", _md_table(res["checks"]["segment_consistency"]["windows"],
                                                    ["window", "start", "end", "trades", "expectancy_R", "sum_R", "win_rate"])]
     lines += ["", "通过统计检验只说明“这段历史里的结果不太像运气”，不保证未来收益；上线仍须按 G0–G9 依次通过。"]
     return "\n".join(lines) + "\n"
@@ -101,8 +110,10 @@ def matrix_md(res: dict[str, Any]) -> str:
                       f"样本内 → 样本外的 Sharpe 斜率 {round(pbo['performance_degradation'], 3)}（负数说明越挑越差）。"]
     else:
         lines += ["", f"PBO：{pbo.get('note') or pbo.get('error')}"]
-    if res.get("stress"):
-        s = res["stress"]
-        lines += ["", f"成本压力方案（{s['variant']}）：{s['n']} 笔，期望 R {s.get('mean_R')}，区间下限 {s.get('ci_lower')}。"]
+    for s in res.get("stress_all") or []:
+        lines += ["", f"压力方案（{s['variant']}）：{s['n']} 笔，期望 R {s.get('mean_R')}，区间下限 {s.get('ci_lower')}。"]
+    if res.get("verdict_parts"):
+        lines += ["", f"**总判定：{res['verdict']}**（各部分：{json.dumps(res['verdict_parts'], ensure_ascii=False, default=str)}）",
+                  f"_{res.get('note', '')}_"]
     lines += ["", stats_md(res["pooled"], f"基准方案（{res['base_variant']}）合并检验").replace("# ", "## ", 1)]
     return "\n".join(lines)

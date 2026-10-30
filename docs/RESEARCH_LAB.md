@@ -1,4 +1,4 @@
-# 研究前端：找想法、筛因子、统计检验（v2.5）
+# 研究前端：找想法、筛因子、统计检验（v2.6）
 
 本框架的研究前端由 `fwresearch/` 提供，hyper-trader 与 freq-trader 两个模板共用同一份代码。
 它借用了 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项强项，但**交易逻辑、回测口径和上线门槛仍然由本框架负责**：
@@ -281,13 +281,48 @@ v2.4 规则（`fwresearch/blockbeats.py` 的 `classify`，v2.5 已改为只看�
 | `python -m fwresearch news replay --source odaily --since 2024-01-01 --verbose` | 用当前规则回放：每个币 / 交易所被封的时间占比和命中标题 |
 | `python -m fwresearch news daily --source odaily` | 按币每日新闻计数，给 `factors --news-csv` |
 
+## 研究流程的修正（v2.6，来自外部审查）
+
+**统计判定（`fwresearch/stats.py`）**：
+
+| 情况 | v2.5 及以前 | v2.6 |
+|---|---|---|
+| 30–99 笔 | 可以判“通过” | 最多判“证据不足”（G1 要求 ≥ 100 笔） |
+| 某项检验无法判定（DSR 缺数据、未指定样本外段等） | 被排除，其余通过就算通过 | 判“证据不足”，并列出缺哪项 |
+| PBO、成本压力 | 计算了但不进总判定 | `lab matrix` 的总判定：任一部分不通过 → 不通过；缺任一部分 → 证据不足 |
+| 样本外 | 没有 | `--holdout-start <日期>`：之后的交易单独检验，期望 R > 0 且 ≥ 10 笔（示例值）；不指定 → 证据不足 |
+| 逐笔不独立 | 只有逐笔 Bootstrap | 另加按周汇总 R 的 Bootstrap（必需检验） |
+| `walk_forward` | 名字像滚动验证 | 报告里改叫“分段一致性”：同一批结果按时间切段，不是“训练 → 冻结 → 样本外”的滚动验证 |
+| 只登记 1 种方案 | DSR 未判定 | DSR 退化为 PSR 判定，并提示如实登记尝试次数 |
+
+符号翻转检验假设零假设下 R 关于 0 对称；止损截断在 −1R、盈利长尾时只作参考，以 Bootstrap 为主。
+
+**可复核性**：`plan` 写入任务清单 `research/jobs.json` 和版本指纹（代码、配置、数据文件清单等的哈希）；`run` 先删旧结果再跑；
+`aggregate` 与 `lab matrix` 只用清单里、成功、指纹一致的任务（被排除的会列出来）。freq-trader 的回测一律 `--cache none`
+（freqtrade 的缓存不包含框架基类和外部文件）；复核哈希包含净盈亏、费用、资金费、止损和全部订单。`base` 方案固定 `stop_min_mode = skip`。
+
+**组合回测是主证据**：研究矩阵（单币 × 单年）只作诊断——测不到组合约束、年末强制平仓、合并的逐笔记录不是一个账户的路径。
+
+| 模板 | 命令 | 做法 |
+|---|---|---|
+| freq-trader | `s03ft research portfolio --variant base --timerange 20220101-` | freqtrade 原生的多交易对、连续时间、共享余额回测（含框架全部入场检查） |
+| hyper-trader | `python3 scripts/research_matrix.py portfolio --since 2022-01-01` | 每个币连续时间回放，再按同时持仓数、总风险取舍、共享权益复利（`fwresearch/portfolio.py`，交易层近似：被挡掉之后的信号不重算、不查相关性） |
+
+组合回测的逐笔 CSV 在 `research/results/portfolio/<方案>.csv`，可交给 `lab stats --trades … --holdout-start …`。
+权益曲线按已平仓交易计算，不含持仓浮亏。
+
+**压力方案（每个只改一个因素）**：freq-trader 有 `cost2x`（每边 0.19%）、`delay1`（入场推迟一根 K 线，只在回测生效）；
+hyper-trader 有 `cost2x`（手续费 × 2、滑点 × 3，止损单也按此滑点）、`funding2x`。`lab matrix --stress auto` 用清单里跑过的压力方案，`cost2x` 必须有。
+**仍未实现（结论里要写明）**：freq-trader 的止损额外滑点与跳空、资金费 × 2、未成交与排队；hyper-trader 回放不应用事件窗口与新闻守卫。
+freq-trader 回测要用历史事件：`s03ft events build --out research/events_history.json --history`，研究矩阵会自动读取。
+
 ## 命令一览
 
 | 命令 | 作用 |
 |---|---|
 | `python3 scripts/run.py lab factors [--zoo builtin|vt|all] [--mode auto|cross_section|time_series] [--horizon N]` | 筛因子（5 个币时默认跨币种比较），输出 `research/lab/factors-*.json|md` |
-| `python3 scripts/run.py lab stats --trades <csv>` | 对一份逐笔交易做统计检验 |
-| `python3 scripts/run.py lab matrix [--base base] [--stress cost2x]` | 研究矩阵的多方案检验 |
+| `python3 scripts/run.py lab stats --trades <csv> --holdout-start <日期>` | 对一份逐笔交易做统计检验（不指定样本外段 → 证据不足） |
+| `python3 scripts/run.py lab matrix --holdout-start <日期> [--stress auto]` | 研究矩阵的多方案检验（含 PBO、压力方案的总判定） |
 | `python3 scripts/run.py lab idea add|list|show|move|attach|trials` | 想法登记簿（`research/ideas.jsonl`，只追加，建议提交到仓库） |
 | `python3 scripts/run.py lab vt-check [--vt-bin DIR]` | Vibe-Trading 安装自检 |
 | `python3 scripts/run.py lab news check|blocks|daily|backfill|replay` | 新闻（Odaily + BlockBeats）：自检、当前守卫、每日汇总；另有 `collect`、`backfill`、`replay`（见上一节） |
